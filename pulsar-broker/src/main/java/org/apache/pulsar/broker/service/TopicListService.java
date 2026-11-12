@@ -25,11 +25,12 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -75,7 +76,7 @@ public class TopicListService {
         // upper bound for buffered topic list updates
         private static final int DEFAULT_TOPIC_LIST_UPDATE_MAX_QUEUE_SIZE = 10000;
         /** Topic names which are matching, the topic name contains the partition suffix. **/
-        private final Set<String> matchingTopics;
+        private final SortedSet<String> matchingTopics;
         private final TopicListService topicListService;
         private final long id;
         private final NamespaceName namespace;
@@ -115,7 +116,7 @@ public class TopicListService {
             this.namespace = namespace;
             this.topicsPattern = topicsPattern;
             this.executor = executor;
-            this.matchingTopics = new LinkedHashSet<>();
+            this.matchingTopics = new TreeSet<>();
             // start with in progress state since topic list update will be sent first
             this.sendingInProgress = true;
             this.sendTopicListUpdateTasks =

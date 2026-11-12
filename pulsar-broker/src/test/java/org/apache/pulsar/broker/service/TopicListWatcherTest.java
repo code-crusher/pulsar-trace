@@ -104,6 +104,23 @@ public class TopicListWatcherTest {
     }
 
     @Test
+    public void testHashAfterInsertingTopicOutOfOrder() {
+        // the hash must not depend on the order in which the topics were added, also when a topic sorts before the
+        // topics that were already matching
+        String newTopic = "persistent://tenant/ns/topic0";
+        watcher.onTopicEvent(newTopic, NotificationType.Created);
+
+        List<String> allMatchingTopics = Arrays.asList(
+                newTopic, "persistent://tenant/ns/topic1", "persistent://tenant/ns/topic2");
+        String hash = TopicList.calculateHash(allMatchingTopics);
+        verify(topicListService).sendTopicListUpdate(eq(ID), eq(hash), eq(Collections.emptyList()),
+                eq(Collections.singletonList(newTopic)), any(), any());
+        Assert.assertEquals(
+                allMatchingTopics,
+                watcher.getMatchingTopics());
+    }
+
+    @Test
     public void testAcceptIgnoresNonMatching() {
         watcher.onTopicEvent("persistent://tenant/ns/mytopic", NotificationType.Created);
         verifyNoInteractions(topicListService);

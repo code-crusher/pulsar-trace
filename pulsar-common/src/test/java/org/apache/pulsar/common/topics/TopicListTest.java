@@ -29,8 +29,11 @@ import com.google.common.collect.Lists;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 import org.apache.pulsar.common.naming.TopicName;
 import org.testng.annotations.DataProvider;
@@ -224,6 +227,31 @@ public class TopicListTest {
 
         String hash5 = TopicList.calculateHash(Collections.emptyList());
         assertEquals(hash5, "00000000", "Hash of empty list must be 0");
+    }
+
+    @Test
+    public void testCalculateHashOfSortedSet() {
+        String topicName1 = "persistent://my-property/my-ns/pattern-topic-1";
+        String topicName2 = "persistent://my-property/my-ns/pattern-topic-2";
+        String topicName3 = "persistent://my-property/my-ns/pattern-topic-3";
+        List<String> topics = Arrays.asList(topicName3, topicName2, topicName1);
+        String expectedHash = TopicList.calculateHash(topics);
+
+        // a sorted set that uses the natural ordering must produce the same hash as any other collection
+        assertEquals(TopicList.calculateHash(new TreeSet<>(topics)), expectedHash);
+        assertEquals(TopicList.calculateHash(new TreeSet<>(topics)), "90d4a04a");
+        assertEquals(TopicList.calculateHash(new TreeSet<>(Collections.singletonList(topicName1))),
+                "0d0602ed");
+        assertEquals(TopicList.calculateHash(new TreeSet<String>()), "00000000");
+        // topic names with a comma must be hashed the same way, the delimiter is only added between the topics
+        List<String> topicsWithComma = Arrays.asList("persistent://my-property/my-ns/a,b",
+                "persistent://my-property/my-ns/a", "persistent://my-property/my-ns/b");
+        assertEquals(TopicList.calculateHash(new TreeSet<>(topicsWithComma)),
+                TopicList.calculateHash(topicsWithComma));
+        // a sorted set with another ordering is sorted by the natural ordering before hashing
+        SortedSet<String> reverseOrderedTopics = new TreeSet<>(Comparator.reverseOrder());
+        reverseOrderedTopics.addAll(topics);
+        assertEquals(TopicList.calculateHash(reverseOrderedTopics), expectedHash);
     }
 
     @Test

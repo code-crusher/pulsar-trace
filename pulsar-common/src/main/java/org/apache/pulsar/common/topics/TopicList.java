@@ -25,8 +25,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -94,15 +96,31 @@ public class TopicList {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Calculates the hash of the topics. The hash doesn't depend on the iteration order of the collection, since the
+     * topics are sorted by the natural ordering of the topic names before hashing. A {@link SortedSet} that uses the
+     * natural ordering is already sorted, so it is hashed without copying or sorting it, which matters for large topic
+     * lists that are hashed on every topic change.
+     */
     public static String calculateHash(Collection<String> topics) {
-        Hasher hasher = Hashing.crc32c().newHasher();
+        if (topics instanceof SortedSet<String> sortedTopics && sortedTopics.comparator() == null) {
+            // the iteration order is the natural ordering, so the topics don't have to be copied and sorted
+            return calculateHashOfSortedTopics(sortedTopics);
+        }
         String[] sortedTopics = topics.toArray(new String[topics.size()]);
         Arrays.sort(sortedTopics);
-        for (int i = 0; i < sortedTopics.length; i++) {
-            hasher.putString(sortedTopics[i], StandardCharsets.UTF_8);
-            // Skip the delimiter for the last item so that the hash format is compatible with previous versions
-            if (i < sortedTopics.length - 1) {
+        return calculateHashOfSortedTopics(Arrays.asList(sortedTopics));
+    }
+
+    private static String calculateHashOfSortedTopics(Iterable<String> sortedTopics) {
+        Hasher hasher = Hashing.crc32c().newHasher();
+        Iterator<String> iterator = sortedTopics.iterator();
+        if (iterator.hasNext()) {
+            hasher.putString(iterator.next(), StandardCharsets.UTF_8);
+            while (iterator.hasNext()) {
+                // Skip the delimiter for the last item so that the hash format is compatible with previous versions
                 hasher.putByte((byte) ',');
+                hasher.putString(iterator.next(), StandardCharsets.UTF_8);
             }
         }
         return hasher.hash().toString();
