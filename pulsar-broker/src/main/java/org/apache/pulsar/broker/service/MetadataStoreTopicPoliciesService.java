@@ -39,6 +39,8 @@ import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreException.NotFoundException;
 import org.apache.pulsar.metadata.api.Notification;
 import org.apache.pulsar.metadata.api.NotificationType;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -51,11 +53,13 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
     public static final String LOCAL_POLICIES_ROOT = "/admin/topic-policies/local";
 
     private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final Map<TopicName, List<TopicPolicyListener>> listeners = new ConcurrentHashMap<>();
+    private final Map<TopicName, TopicListeners> listeners = new ConcurrentHashMap<>();
     private MetadataCache<TopicPolicies> localPoliciesCache;
     private MetadataCache<TopicPolicies> globalPoliciesCache;
     private volatile Runnable cancelLocalStoreListener;
     private volatile Runnable cancelConfigurationStoreListener;
+    private volatile Runnable cancelLocalSessionListener;
+    private volatile Runnable cancelConfigurationSessionListener;
 
     @Override
     public void start(PulsarService pulsar) {
@@ -67,6 +71,76 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
                 localStore.registerCancellableListener(notification -> handleNotification(notification, false));
         cancelConfigurationStoreListener =
                 configurationStore.registerCancellableListener(notification -> handleNotification(notification, true));
+        if (localStore == configurationStore) {
+            // A single metadata store backs both scopes: one session listener has to resync both of them, otherwise
+            // the same store would be resynced twice for every session event.
+            cancelLocalSessionListener = registerSessionListener(localStore, true);
+        } else {
+            cancelLocalSessionListener = registerSessionListener(localStore, false);
+            cancelConfigurationSessionListener = registerSessionListener(configurationStore, false);
+        }
+    }
+
+    /**
+     * Register a listener that re-reads the policies after the session with the metadata store has been
+     * re-established.
+     *
+     * <p>This backend learns about changes only from metadata-store watches, which do not replay what happened while
+     * the session was lost: a policy changed during a transient disconnection would never reach the listeners (issue
+     * #26453). Re-reading the stored state on reconnection is the equivalent of
+     * {@code SystemTopicBasedTopicPoliciesService} resuming its {@code __change_events} reader from the last
+     * consumed offset.
+     *
+     * @param bothScopes whether the store backs both the local and the global policies (single-store deployment)
+     */
+    private Runnable registerSessionListener(MetadataStore store, boolean bothScopes) {
+        if (!(store instanceof MetadataStoreExtended storeExtended)) {
+            return () -> { };
+        }
+        return storeExtended.registerCancellableSessionListener(event -> {
+            if (event != SessionEvent.Reconnected && event != SessionEvent.SessionReestablished) {
+                return;
+            }
+            resyncTopicPolicies(false);
+            if (bothScopes) {
+                resyncTopicPolicies(true);
+            }
+        });
+    }
+
+    /**
+     * Re-read the policies of every topic that has a listener registered and deliver them, so that the changes that
+     * produced no notification while the session was disconnected are not lost.
+     *
+     * <p>A listener is told that the policies were removed ({@code null}) only when it may have been told that they
+     * existed, i.e. when this scope had already delivered a value for the topic. Telling a topic that never had
+     * policies in this scope that they were removed is indistinguishable from a deletion to a topic that is still
+     * loading its initial policies, which would then be dropped.
+     */
+    private void resyncTopicPolicies(boolean isGlobalPolicy) {
+        if (closed.get()) {
+            return;
+        }
+        MetadataCache<TopicPolicies> cache = cache(isGlobalPolicy);
+        for (TopicName topicName : listeners.keySet()) {
+            String path = pathFor(topicName, isGlobalPolicy);
+            // The store discards its caches on reconnection, so the path is read from the store, not from the cache.
+            cache.invalidate(path);
+            cache.get(path).whenComplete((policies, error) -> {
+                if (error != null) {
+                    log.warn()
+                            .attr("path", path)
+                            .exception(error)
+                            .log("Failed to re-read topic policies after a metadata session event");
+                    return;
+                }
+                if (policies.isPresent()) {
+                    notifyListeners(topicName, isGlobalPolicy, cloneWithScope(policies.get(), isGlobalPolicy));
+                } else if (isDelivered(topicName, isGlobalPolicy)) {
+                    notifyListeners(topicName, isGlobalPolicy, null);
+                }
+            });
+        }
     }
 
     @Override
@@ -135,8 +209,15 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
             return CompletableFuture.completedFuture(Optional.empty());
         }
         boolean global = type == GetType.GLOBAL_ONLY;
-        return cache(global).get(pathFor(partitionedTopicName, global))
-                .thenApply(policies -> policies.map(policy -> cloneWithScope(policy, global)));
+        return cache(global).get(pathFor(partitionedTopicName, global)).thenApply(policies -> {
+            // A topic that loaded its policies also knows about them, even though no notification was delivered for
+            // them, so a later resync has to tell it if they are gone. The state is kept with the listeners, so
+            // reading the policies of a topic without one leaves nothing behind.
+            if (policies.isPresent()) {
+                markDelivered(partitionedTopicName, global);
+            }
+            return policies.map(policy -> cloneWithScope(policy, global));
+        });
     }
 
     @Deprecated
@@ -144,9 +225,9 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
     public boolean registerListener(TopicName topicName, TopicPolicyListener listener) {
         listeners.compute(normalizeTopicName(topicName), (__, topicListeners) -> {
             if (topicListeners == null) {
-                topicListeners = new CopyOnWriteArrayList<>();
+                topicListeners = new TopicListeners();
             }
-            topicListeners.add(listener);
+            topicListeners.listeners.add(listener);
             return topicListeners;
         });
         return true;
@@ -154,9 +235,11 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
 
     @Override
     public void unregisterListener(TopicName topicName, TopicPolicyListener listener) {
-        listeners.computeIfPresent(normalizeTopicName(topicName), (__, topicListeners) -> {
-            topicListeners.remove(listener);
-            return topicListeners.isEmpty() ? null : topicListeners;
+        TopicName partitionedTopicName = normalizeTopicName(topicName);
+        listeners.computeIfPresent(partitionedTopicName, (__, topicListeners) -> {
+            topicListeners.listeners.remove(listener);
+            // Nobody is left to be told about the policies of this topic, nor to be told that they are gone.
+            return topicListeners.listeners.isEmpty() ? null : topicListeners;
         });
     }
 
@@ -168,6 +251,12 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
             }
             if (cancelConfigurationStoreListener != null) {
                 cancelConfigurationStoreListener.run();
+            }
+            if (cancelLocalSessionListener != null) {
+                cancelLocalSessionListener.run();
+            }
+            if (cancelConfigurationSessionListener != null) {
+                cancelConfigurationSessionListener.run();
             }
             listeners.clear();
             if (localPoliciesCache != null) {
@@ -216,11 +305,14 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
             return;
         }
         MetadataCache<TopicPolicies> cache = cache(isGlobalPolicy);
-        cache.invalidate(path);
         if (notification.getType() == NotificationType.Deleted) {
-            notifyListeners(topicName.get(), null);
+            notifyListeners(topicName.get(), isGlobalPolicy, null);
             return;
         }
+        // The metadata store refreshes its caches when it dispatches the notification, before this listener runs, so
+        // the read below already observes the new value. Invalidating the path first would only widen the window in
+        // which the cache holds no value at all, during which a cache-only read sees the policy as absent rather
+        // than as its previous value, and would add a second, redundant read of the store (issue #26453).
         cache.get(path).whenComplete((policies, error) -> {
             if (error != null) {
                 log.warn()
@@ -229,17 +321,18 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
                         .log("Failed to refresh topic policies after metadata notification");
                 return;
             }
-            notifyListeners(topicName.get(),
+            notifyListeners(topicName.get(), isGlobalPolicy,
                     policies.map(policy -> cloneWithScope(policy, isGlobalPolicy)).orElse(null));
         });
     }
 
-    private void notifyListeners(TopicName topicName, @Nullable TopicPolicies policies) {
-        List<TopicPolicyListener> topicListeners = listeners.get(topicName);
+    private void notifyListeners(TopicName topicName, boolean isGlobalPolicy, @Nullable TopicPolicies policies) {
+        TopicListeners topicListeners = listeners.get(topicName);
         if (topicListeners == null) {
             return;
         }
-        for (TopicPolicyListener listener : topicListeners) {
+        topicListeners.setDelivered(isGlobalPolicy, policies != null);
+        for (TopicPolicyListener listener : topicListeners.listeners) {
             try {
                 listener.onUpdate(policies == null ? null : policies.clone());
             } catch (Throwable error) {
@@ -248,8 +341,45 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
         }
     }
 
+    private void markDelivered(TopicName topicName, boolean isGlobalPolicy) {
+        TopicListeners topicListeners = listeners.get(topicName);
+        if (topicListeners != null) {
+            topicListeners.setDelivered(isGlobalPolicy, true);
+        }
+    }
+
+    private boolean isDelivered(TopicName topicName, boolean isGlobalPolicy) {
+        TopicListeners topicListeners = listeners.get(topicName);
+        return topicListeners != null && topicListeners.isDelivered(isGlobalPolicy);
+    }
+
     private static TopicName normalizeTopicName(TopicName topicName) {
         return TopicName.get(topicName.getPartitionedTopicName());
+    }
+
+    /**
+     * The listeners of one topic, and whether they were last told that the topic has policies, per scope.
+     *
+     * <p>The metadata store discards its caches when the session is re-established, so they cannot tell a policy that
+     * was deleted while the session was lost from a topic that never had one in that scope; this can. It is kept
+     * with the listeners, so that it goes away with the last one.
+     */
+    private static final class TopicListeners {
+        private final List<TopicPolicyListener> listeners = new CopyOnWriteArrayList<>();
+        private volatile boolean localDelivered;
+        private volatile boolean globalDelivered;
+
+        boolean isDelivered(boolean isGlobalPolicy) {
+            return isGlobalPolicy ? globalDelivered : localDelivered;
+        }
+
+        void setDelivered(boolean isGlobalPolicy, boolean delivered) {
+            if (isGlobalPolicy) {
+                globalDelivered = delivered;
+            } else {
+                localDelivered = delivered;
+            }
+        }
     }
 
     private static TopicPolicies cloneWithScope(TopicPolicies policies, boolean isGlobalPolicy) {
