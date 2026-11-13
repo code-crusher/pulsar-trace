@@ -282,6 +282,12 @@ public class WindowFunctionExecutor<T, X> implements Function<T, X> {
         return this.timestampExtractor != null;
     }
 
+    private void ackIfAtLeastOnce(Record<T> record) {
+        if (this.windowConfig.getProcessingGuarantees() == WindowConfig.ProcessingGuarantees.ATLEAST_ONCE) {
+            record.ack();
+        }
+    }
+
     @SuppressWarnings("unchecked")
     @Override
     public X process(T input, Context context) throws Exception {
@@ -302,13 +308,18 @@ public class WindowFunctionExecutor<T, X> implements Function<T, X> {
             if (this.waterMarkEventGenerator.track(record.getTopicName().get(), ts)) {
                 this.windowManager.add(record, ts, record);
             } else {
+                // A late tuple never gets added to a window, so under ATLEAST_ONCE it must be acked
+                // here (ATMOST_ONCE already acked it above), otherwise the subscription cursor
+                // can never move past it.
                 if (this.windowConfig.getLateDataTopic() != null) {
-                    context.newOutputMessage(this.windowConfig.getLateDataTopic(), null).value(input).sendAsync();
+                    context.newOutputMessage(this.windowConfig.getLateDataTopic(), null).value(input)
+                            .sendAsync().thenAccept(__ -> ackIfAtLeastOnce(record));
                 } else {
                     log.info()
                             .attr("input", input)
                             .attr("timestamp", ts)
                             .log("Received a late tuple. This will not be processed");
+                    ackIfAtLeastOnce(record);
                 }
             }
         } else {

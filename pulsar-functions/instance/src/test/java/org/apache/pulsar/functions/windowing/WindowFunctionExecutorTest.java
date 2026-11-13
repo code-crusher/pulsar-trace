@@ -28,6 +28,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 import static org.testng.internal.junit.ArrayAsserts.assertArrayEquals;
 import com.google.gson.Gson;
@@ -280,5 +281,91 @@ public class WindowFunctionExecutorTest {
         }
         System.out.println(testWindowedPulsarFunction.windows);
         long event = events.get(events.size() - 1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testLateTupleWithoutLateDataTopicIsAckedUnderAtleastOnce() throws Exception {
+        windowConfig.setProcessingGuarantees(WindowConfig.ProcessingGuarantees.ATLEAST_ONCE);
+        doReturn(Optional.of(new Gson().fromJson(new Gson().toJson(windowConfig), Map.class))).when(context)
+                .getUserConfigValue(WindowConfig.WINDOW_CONFIG_KEY);
+
+        // advance the watermark first so that any tuple with a smaller timestamp is late
+        Record<?> firstRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(firstRecord).getTopicName();
+        doReturn(firstRecord).when(context).getCurrentRecord();
+        doReturn(1000L).when(firstRecord).getValue();
+        testWindowedPulsarFunction.process(1000L, context);
+        testWindowedPulsarFunction.waterMarkEventGenerator.run();
+
+        Record<?> lateRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(lateRecord).getTopicName();
+        doReturn(lateRecord).when(context).getCurrentRecord();
+        doReturn(600L).when(lateRecord).getValue();
+        testWindowedPulsarFunction.process(600L, context);
+
+        // the late tuple must be acked so that the subscription cursor can move past it
+        verify(lateRecord, times(1)).ack();
+        // ... and it must not have entered any window
+        assertTrue(testWindowedPulsarFunction.windows.isEmpty());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testLateTupleWithLateDataTopicIsAckedAfterRepublish() throws Exception {
+        windowConfig.setProcessingGuarantees(WindowConfig.ProcessingGuarantees.ATLEAST_ONCE);
+        windowConfig.setLateDataTopic("$late");
+        doReturn(Optional.of(new Gson().fromJson(new Gson().toJson(windowConfig), Map.class))).when(context)
+                .getUserConfigValue(WindowConfig.WINDOW_CONFIG_KEY);
+        @SuppressWarnings("rawtypes")
+        TypedMessageBuilder typedMessageBuilder = mock(TypedMessageBuilder.class);
+        when(typedMessageBuilder.value(any())).thenReturn(typedMessageBuilder);
+        when(typedMessageBuilder.sendAsync()).thenReturn(CompletableFuture.completedFuture(null));
+        when(context.newOutputMessage(anyString(), any())).thenReturn(typedMessageBuilder);
+
+        // advance the watermark first so that any tuple with a smaller timestamp is late
+        Record<?> firstRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(firstRecord).getTopicName();
+        doReturn(firstRecord).when(context).getCurrentRecord();
+        doReturn(1000L).when(firstRecord).getValue();
+        testWindowedPulsarFunction.process(1000L, context);
+        testWindowedPulsarFunction.waterMarkEventGenerator.run();
+
+        Record<?> lateRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(lateRecord).getTopicName();
+        doReturn(lateRecord).when(context).getCurrentRecord();
+        doReturn(600L).when(lateRecord).getValue();
+        testWindowedPulsarFunction.process(600L, context);
+
+        // the late tuple must be republished and acked
+        verify(typedMessageBuilder, times(1)).sendAsync();
+        verify(lateRecord, times(1)).ack();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testLateTupleIsNotAckedUnderAtmostOnce() throws Exception {
+        // ATMOST_ONCE acks in WindowFunctionExecutor.process() before the late check, so the
+        // late-tuple path must not ack a second time
+        windowConfig.setProcessingGuarantees(WindowConfig.ProcessingGuarantees.ATMOST_ONCE);
+        doReturn(Optional.of(new Gson().fromJson(new Gson().toJson(windowConfig), Map.class))).when(context)
+                .getUserConfigValue(WindowConfig.WINDOW_CONFIG_KEY);
+
+        // advance the watermark first so that any tuple with a smaller timestamp is late
+        Record<?> firstRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(firstRecord).getTopicName();
+        doReturn(firstRecord).when(context).getCurrentRecord();
+        doReturn(1000L).when(firstRecord).getValue();
+        testWindowedPulsarFunction.process(1000L, context);
+        testWindowedPulsarFunction.waterMarkEventGenerator.run();
+
+        Record<?> lateRecord = mock(Record.class);
+        doReturn(Optional.of("test-topic")).when(lateRecord).getTopicName();
+        doReturn(lateRecord).when(context).getCurrentRecord();
+        doReturn(600L).when(lateRecord).getValue();
+        testWindowedPulsarFunction.process(600L, context);
+
+        // acked exactly once by the ATMOST_ONCE path, not by the late-tuple path
+        verify(lateRecord, times(1)).ack();
     }
 }
