@@ -69,8 +69,12 @@ import org.apache.pulsar.tls.TlsPurpose;
  *
  * <p><b>Fail-fast probing.</b> Eager probing of the statically-needed client purpose
  * ({@link TlsPurpose#CLIENT_DEFAULT}) is a <em>v5-builder-path</em> behaviour only: it runs when the v5
- * builder configured TLS, so a bad path fails the client build with an actionable error. A plain v4 client's
- * config stays lazily loaded, so unmodified v4 tests that lazily tolerated a bad TLS field are not broken.
+ * builder configured TLS <em>for the broker transport</em>, so a bad path fails the client build with an
+ * actionable error. A v5 builder that configured TLS only for another purpose (notably
+ * {@code CLIENT_OAUTH2}) leaves the transport plaintext, and the probe is skipped with it — the transport
+ * would never request {@code CLIENT_DEFAULT}, so probing it would reject a factory that is purpose-scoped
+ * by design. A plain v4 client's config stays lazily loaded,
+ * so unmodified v4 tests that lazily tolerated a bad TLS field are not broken.
  */
 public final class ClientTlsFactorySupport {
 
@@ -214,8 +218,8 @@ public final class ClientTlsFactorySupport {
      * @param blockingExecutor the framework executor for blocking material loading
      * @param openTelemetry    the telemetry root
      * @return the initialized factory (never {@code null})
-     * @throws Exception if the factory cannot be built / initialized, or (v5-builder path) the fail-fast
-     *         probe of {@link TlsPurpose#CLIENT_DEFAULT} fails
+     * @throws Exception if the factory cannot be built / initialized, or (v5-builder path with the broker
+     *         transport on TLS) the fail-fast probe of {@link TlsPurpose#CLIENT_DEFAULT} fails
      */
     public static PulsarTlsFactory resolveClientTlsFactory(ClientConfigurationData conf,
             ScheduledExecutorService scheduler, Executor blockingExecutor, OpenTelemetry openTelemetry)
@@ -243,6 +247,14 @@ public final class ClientTlsFactorySupport {
             ScheduledExecutorService scheduler, Executor blockingExecutor, OpenTelemetry openTelemetry,
             boolean brokerClientPurpose) throws Exception {
         boolean v5BuilderPath = conf.getTlsFactory() != null || conf.getTlsPolicyMap() != null;
+        // The probe exists to fail a build whose transport will request CLIENT_DEFAULT at connection time,
+        // so it is owed only when the broker transport is actually on TLS (useTls — set directly, by the
+        // pulsar+ssl:// / https scheme, or by tlsPolicy(CLIENT_DEFAULT, ...)) or an explicit policy map names
+        // CLIENT_DEFAULT. A purpose-scoped factory that serves only another purpose (CLIENT_OAUTH2 for a
+        // private-CA identity provider) is compliant on a plaintext client, and probing it would reject a
+        // build whose transport never asks for CLIENT_DEFAULT.
+        boolean transportNeedsClientDefault = conf.isUseTls()
+                || (conf.getTlsPolicyMap() != null && conf.getTlsPolicyMap().containsKey(TlsPurpose.CLIENT_DEFAULT));
         PulsarTlsFactory factory;
         Map<String, String> initParams;
         if (conf.getTlsFactory() != null) {
@@ -278,8 +290,10 @@ public final class ClientTlsFactorySupport {
         }
         try {
             initializeBlocking(factory, initContext(initParams, scheduler, blockingExecutor, openTelemetry));
-            // Fail-fast probe only on the v5-builder path.
-            if (v5BuilderPath) {
+            // Fail-fast probe only on the v5-builder path, and only when the broker transport will
+            // actually request CLIENT_DEFAULT — an IdP-only (CLIENT_OAUTH2) configuration on a plaintext
+            // client must not be rejected for not serving a purpose it never needs.
+            if (v5BuilderPath && transportNeedsClientDefault) {
                 probe(factory, TlsPurpose.CLIENT_DEFAULT,
                         TlsSynthesisSpec.client(conf.isTlsHostnameVerificationEnable()));
             }

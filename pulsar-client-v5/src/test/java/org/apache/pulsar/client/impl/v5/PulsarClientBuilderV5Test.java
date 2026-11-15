@@ -1040,4 +1040,120 @@ public class PulsarClientBuilderV5Test {
         assertTrue(builder.getConfForTesting().isUseTls(),
                 "a CLIENT_DEFAULT policy configures the broker transport and must enable TLS");
     }
+
+    /**
+     * PIP-478: a custom factory that serves only {@link TlsPurpose#CLIENT_OAUTH2} builds on a plaintext
+     * client.
+     *
+     * <p>The whole point of an adopted factory on a {@code pulsar://} URL is the identity-provider leg: a
+     * private-CA HTTPS IdP. Such a factory is purpose-scoped by design and legitimately cannot serve
+     * {@code CLIENT_DEFAULT}. The client's transport never requests it (the broker connection is plaintext),
+     * so the build must not probe it — probing made the adopted factory fail client construction with
+     * "supplied no Netty SslContext for purpose CLIENT_DEFAULT" even though nothing would ever ask for one.
+     */
+    @Test
+    public void anOauth2OnlyFactoryBuildsOnAPlaintextClient() throws Exception {
+        OAuth2OnlyTlsFactory factory = new OAuth2OnlyTlsFactory();
+        PulsarClientBuilderV5 builder = new PulsarClientBuilderV5();
+        builder.serviceUrl("pulsar://localhost:6650").tlsFactory(factory);
+
+        try (PulsarClient client = builder.build()) {
+            assertEquals(factory.initialized.get(), 1, "the adopted factory is initialized once");
+            assertEquals(factory.clientDefaultRequests.get(), 0,
+                    "a plaintext transport must never be asked for CLIENT_DEFAULT");
+        }
+        assertEquals(factory.closed.get(), 1, "the client closes the factory it adopted");
+    }
+
+    /**
+     * The flip side: the same CLIENT_OAUTH2-only factory on a TLS broker URL must fail the build, because the
+     * transport will request {@code CLIENT_DEFAULT} and the factory cannot serve it. Fail-fast is kept for
+     * exactly the case the probe exists for.
+     */
+    @Test
+    public void anOauth2OnlyFactoryFailsFastOnATlsClient() {
+        OAuth2OnlyTlsFactory factory = new OAuth2OnlyTlsFactory();
+        PulsarClientBuilderV5 builder = new PulsarClientBuilderV5();
+        builder.serviceUrl("pulsar+ssl://localhost:6651").tlsFactory(factory);
+
+        assertThatThrownBy(builder::build)
+                .as("a TLS transport against a factory that cannot serve CLIENT_DEFAULT must fail the build")
+                .isNotNull();
+        assertThat(factory.clientDefaultRequests.get())
+                .as("the probe asked for CLIENT_DEFAULT")
+                .isGreaterThan(0);
+        assertThat(factory.closed).as("the failed build closes the adopted factory").hasValue(1);
+    }
+
+    /** A CLIENT_OAUTH2-only policy on a plaintext client must not trigger the CLIENT_DEFAULT probe either. */
+    @Test
+    public void anOauth2OnlyPolicyDoesNotProbeClientDefault() throws Exception {
+        PulsarClientBuilderV5 builder = (PulsarClientBuilderV5) PulsarClient.builder()
+                .serviceUrl("pulsar://my-pulsar:6650")
+                .tlsPolicy(TlsPurpose.CLIENT_OAUTH2, TlsPolicy.builder()
+                        .trustCertsFilePath("/tls/idp-ca.pem").build());
+
+        // The build must not fail on a CLIENT_DEFAULT probe; the policy's file is never read at build time.
+        try (PulsarClient client = builder.build()) {
+            assertNotNull(client);
+        }
+    }
+
+    /** Serves {@link TlsPurpose#CLIENT_OAUTH2} only; counts lifecycle and CLIENT_DEFAULT requests. */
+    private static final class OAuth2OnlyTlsFactory implements PulsarTlsFactory {
+
+        private final AtomicInteger initialized = new AtomicInteger();
+        private final AtomicInteger closed = new AtomicInteger();
+        private final AtomicInteger clientDefaultRequests = new AtomicInteger();
+
+        @Override
+        public CompletableFuture<Void> initialize(TlsFactoryInitContext context) {
+            initialized.incrementAndGet();
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public <T> CompletableFuture<Optional<TlsHandle<T>>> createInstance(TlsPurpose purpose,
+                Class<T> instanceClass) {
+            return serve(purpose, instanceClass);
+        }
+
+        @Override
+        public <T> CompletableFuture<Optional<TlsHandle<T>>> createInstance(TlsPurpose purpose,
+                Class<T> instanceClass, Consumer<T> onLoadOrReload) {
+            return serve(purpose, instanceClass);
+        }
+
+        private <T> CompletableFuture<Optional<TlsHandle<T>>> serve(TlsPurpose purpose, Class<T> instanceClass) {
+            if (TlsPurpose.CLIENT_DEFAULT.equals(purpose)) {
+                clientDefaultRequests.incrementAndGet();
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+            if (!TlsPurpose.CLIENT_OAUTH2.equals(purpose) || instanceClass != SslContext.class) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+            try {
+                SslContext context = SslContextBuilder.forClient().build();
+                TlsHandle<T> handle = new TlsHandle<>() {
+                    @Override
+                    @SuppressWarnings("unchecked")
+                    public T get() {
+                        return (T) context;
+                    }
+
+                    @Override
+                    public void dispose() {
+                    }
+                };
+                return CompletableFuture.completedFuture(Optional.of(handle));
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+
+        @Override
+        public void close() {
+            closed.incrementAndGet();
+        }
+    }
 }
