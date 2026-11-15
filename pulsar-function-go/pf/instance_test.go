@@ -147,3 +147,103 @@ func TestShouldNackInputOnFailure(t *testing.T) {
 		})
 	}
 }
+
+func newProcessResultTestInstance(sink *pb.SinkSpec) *goInstance {
+	if sink == nil {
+		sink = &pb.SinkSpec{Topic: "test-output-topic"}
+	}
+	return &goInstance{
+		context: &FunctionContext{
+			instanceConf: &instanceConf{
+				funcDetails: pb.FunctionDetails{
+					ProcessingGuarantees: pb.ProcessingGuarantees_ATLEAST_ONCE,
+					AutoAck:              false,
+					Sink:                 sink,
+				},
+			},
+		},
+		producer: &CapturingPulsarProducer{},
+		stats:    NewStatWithLabelValues("test", "test", "test", "test", "test", "test"),
+	}
+}
+
+func TestProcessResultForwardsSourceMessageProperties(t *testing.T) {
+	instance := newProcessResultTestInstance(&pb.SinkSpec{
+		Topic:                        "test-output-topic",
+		ForwardSourceMessageProperty: true,
+	})
+	producer := instance.producer.(*CapturingPulsarProducer)
+
+	inputMessage := &MockMessage{
+		properties: map[string]string{"custom-key": "custom-value"},
+		messageID:  &MockMessageID{},
+		payload:    []byte(`{}`),
+		topic:      "test-input-topic",
+	}
+
+	instance.processResult(inputMessage, []byte(`output`))
+
+	if len(producer.sent) != 1 {
+		t.Fatalf("expected 1 message to be sent, got %d", len(producer.sent))
+	}
+	assert.Equal(t, "custom-value", producer.sent[0].Properties["custom-key"])
+	assert.Equal(t, []byte(`output`), producer.sent[0].Payload)
+}
+
+func TestProcessResultDoesNotForwardSourceMessagePropertiesByDefault(t *testing.T) {
+	instance := newProcessResultTestInstance(&pb.SinkSpec{
+		Topic: "test-output-topic",
+	})
+	producer := instance.producer.(*CapturingPulsarProducer)
+
+	inputMessage := &MockMessage{
+		properties: map[string]string{"custom-key": "custom-value"},
+		messageID:  &MockMessageID{},
+		payload:    []byte(`{}`),
+		topic:      "test-input-topic",
+	}
+
+	instance.processResult(inputMessage, []byte(`output`))
+
+	assert.Equal(t, 1, len(producer.sent))
+	assert.NotContains(t, producer.sent[0].Properties, "custom-key")
+}
+
+func TestProcessResultDropsReservedPropertiesFromSourceMessage(t *testing.T) {
+	instance := newProcessResultTestInstance(&pb.SinkSpec{
+		Topic:                        "test-output-topic",
+		ForwardSourceMessageProperty: true,
+	})
+	producer := instance.producer.(*CapturingPulsarProducer)
+
+	inputMessage := &MockMessage{
+		properties: map[string]string{
+			"custom-key":           "custom-value",
+			"__pfn_input_topic__":  "persistent://tenant/namespace/forged",
+			"__pfn_input_msg_id__": "forged-message-id",
+		},
+		messageID: &MockMessageID{},
+		payload:   []byte(`{}`),
+		topic:     "test-input-topic",
+	}
+
+	instance.processResult(inputMessage, []byte(`output`))
+
+	assert.Equal(t, 1, len(producer.sent))
+	assert.Equal(t, "custom-value", producer.sent[0].Properties["custom-key"])
+	assert.NotContains(t, producer.sent[0].Properties, "__pfn_input_topic__")
+	assert.NotContains(t, producer.sent[0].Properties, "__pfn_input_msg_id__")
+}
+
+func TestForwardedSourceMessagePropertiesHandlesMissingProperties(t *testing.T) {
+	// nil properties and an all-reserved property map must not produce an empty non-nil map.
+	assert.Nil(t, forwardedSourceMessageProperties(&MockMessage{messageID: &MockMessageID{}}, true))
+	assert.Nil(t, forwardedSourceMessageProperties(&MockMessage{
+		properties: map[string]string{"__pfn_input_topic__": "x"},
+		messageID:  &MockMessageID{},
+	}, true))
+	assert.Nil(t, forwardedSourceMessageProperties(&MockMessage{
+		properties: map[string]string{"custom-key": "custom-value"},
+		messageID:  &MockMessageID{},
+	}, false))
+}

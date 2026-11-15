@@ -475,15 +475,53 @@ func (gi *goInstance) handlerMsg(input pulsar.Message) (output []byte, err error
 	return gi.function.process(ctx, msgInput)
 }
 
+// reservedSourceMessagePropertyKeys are the keys the function runtimes use to trace the input
+// message an output was produced from; the Java and Python runtimes set them on the output message
+// after copying the forwarded properties, so a source property of the same name can never
+// overwrite them. The Go runtime does not set them; they are dropped from the forwarded properties
+// so a source message can not forge them either.
+var reservedSourceMessagePropertyKeys = map[string]struct{}{
+	"__pfn_input_topic__":  {},
+	"__pfn_input_msg_id__": {},
+}
+
+// forwardedSourceMessageProperties returns the properties of the input message to copy onto the
+// output message. It returns nil when the function is not configured to forward the source message
+// properties. The reserved __pfn_input_* keys are stripped so the output message can not be
+// produced with a forged input topic or message id.
+func forwardedSourceMessageProperties(msgInput pulsar.Message, forward bool) map[string]string {
+	if !forward {
+		return nil
+	}
+	source := msgInput.Properties()
+	if len(source) == 0 {
+		return nil
+	}
+	props := make(map[string]string, len(source))
+	for k, v := range source {
+		if _, reserved := reservedSourceMessagePropertyKeys[k]; reserved {
+			continue
+		}
+		props[k] = v
+	}
+	if len(props) == 0 {
+		return nil
+	}
+	return props
+}
+
 func (gi *goInstance) processResult(msgInput pulsar.Message, output []byte) {
 	atLeastOnce := gi.context.instanceConf.funcDetails.ProcessingGuarantees == pb.ProcessingGuarantees_ATLEAST_ONCE
 	autoAck := gi.context.instanceConf.funcDetails.AutoAck //nolint:staticcheck
+	sink := gi.context.instanceConf.funcDetails.Sink
+	forwardSourceMessageProperty := sink != nil && sink.GetForwardSourceMessageProperty()
 
 	// If the function had an output and the user has specified an output topic, the output needs to be sent to the
 	// assigned output topic.
-	if output != nil && gi.context.instanceConf.funcDetails.Sink.Topic != "" {
+	if output != nil && sink != nil && sink.Topic != "" {
 		asyncMsg := pulsar.ProducerMessage{
-			Payload: output,
+			Payload:    output,
+			Properties: forwardedSourceMessageProperties(msgInput, forwardSourceMessageProperty),
 		}
 		// Dispatch an async send for the message with callback in case of error.
 		gi.producer.SendAsync(context.Background(), &asyncMsg,

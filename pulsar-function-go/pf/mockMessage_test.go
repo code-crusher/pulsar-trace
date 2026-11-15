@@ -30,10 +30,11 @@ type MockMessage struct {
 	properties map[string]string
 	messageID  *MockMessageID
 	payload    []byte
+	topic      string
 }
 
 func (m *MockMessage) Topic() string {
-	return ""
+	return m.topic
 }
 
 func (m *MockMessage) ProducerName() string {
@@ -134,6 +135,19 @@ func (m *MockMessageID) BatchSize() int32 {
 
 func (m *MockMessageID) String() string {
 	return "mock-message-id"
+}
+
+// CapturingPulsarProducer records the messages it is asked to send so tests can assert on them.
+// It invokes the callback with a nil error, as a successful send would.
+type CapturingPulsarProducer struct {
+	MockPulsarProducer
+	sent []*pulsar.ProducerMessage
+}
+
+func (producer *CapturingPulsarProducer) SendAsync(_ context.Context, msg *pulsar.ProducerMessage,
+	callback func(pulsar.MessageID, *pulsar.ProducerMessage, error)) {
+	producer.sent = append(producer.sent, msg)
+	callback(&MockMessageID{}, msg, nil)
 }
 
 type MockPulsarProducer struct{}
