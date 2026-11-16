@@ -19,6 +19,7 @@
 package org.apache.pulsar.broker.service.persistent;
 
 import static org.apache.pulsar.broker.service.persistent.BrokerServicePersistInternalMethodInvoker.ensureNoBacklogByInflightTask;
+import static org.apache.pulsar.client.impl.GeoReplicationProducerImpl.MSG_PROP_REPL_SOURCE_POSITION;
 import static org.apache.pulsar.common.protocol.Commands.serializeMetadataAndPayload;
 import static org.testng.Assert.assertTrue;
 import com.google.common.collect.Lists;
@@ -26,16 +27,22 @@ import com.google.common.collect.Sets;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import lombok.Cleanup;
 import lombok.CustomLog;
 import org.apache.bookkeeper.mledger.Entry;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.impl.EntryImpl;
 import org.apache.pulsar.broker.BrokerTestUtil;
 import org.apache.pulsar.broker.PulsarService;
+import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.service.BrokerTestBase;
+import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
@@ -44,6 +51,7 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.schema.GenericRecord;
+import org.apache.pulsar.client.impl.MessageIdImpl;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ReplicatorStats;
@@ -153,6 +161,118 @@ public class ShadowReplicatorTest extends BrokerTestBase {
         Assert.assertEquals(replicator.stats.getBytesOutCount(), 0);
 
         Assert.assertEquals(shadowMessage.getMessageId(), sourceMessage.getMessageId());
+    }
+
+    @Test
+    public void testShadowDeduplicationRecoveryFromSourceLedger() throws Exception {
+        ServiceConfiguration configuration = pulsar.getConfiguration();
+        Integer originalSnapshotInterval = configuration.getBrokerDeduplicationSnapshotIntervalSeconds();
+        int originalEntriesInterval = configuration.getBrokerDeduplicationEntriesInterval();
+        configuration.setBrokerDeduplicationSnapshotIntervalSeconds(0);
+        configuration.setBrokerDeduplicationEntriesInterval(Integer.MAX_VALUE);
+        String sourceTopicName = BrokerTestUtil.newUniqueName("persistent://prop1/ns-source/source-topic");
+        String shadowTopicName = BrokerTestUtil.newUniqueName("persistent://prop1/ns-shadow/shadow-topic");
+        String producerName = "ordinary-source-producer";
+        try {
+            admin.namespaces().setDeduplicationStatus("prop1/ns-shadow", true);
+            admin.topics().createNonPartitionedTopic(sourceTopicName);
+            admin.topics().createShadowTopic(shadowTopicName, sourceTopicName);
+            PersistentTopic shadowTopic = (PersistentTopic) pulsar.getBrokerService()
+                    .getTopic(shadowTopicName, false).get(10, TimeUnit.SECONDS).orElseThrow();
+            MessageDeduplication deduplication = shadowTopic.getMessageDeduplication();
+            Awaitility.await().untilAsserted(() -> assertTrue(deduplication.isEnabled()));
+            admin.topics().setShadowTopics(sourceTopicName, List.of(shadowTopicName));
+
+            MessageIdImpl olderMessageId;
+            try (Producer<byte[]> producer = pulsarClient.newProducer().topic(sourceTopicName)
+                    .producerName(producerName).enableBatching(false).create()) {
+                producer.newMessage().sequenceId(7).value(new byte[]{1}).send();
+                olderMessageId = (MessageIdImpl) producer.newMessage().sequenceId(8)
+                        .value(new byte[]{2}).send();
+            }
+            String shadowProducerName = ShadowReplicator.getShadowProducerName(configuration.getReplicatorPrefix(),
+                    sourceTopicName, shadowTopicName);
+            MessageDeduplication.ReplSourcePosition olderPosition = new MessageDeduplication.ReplSourcePosition(
+                    olderMessageId.getLedgerId(), olderMessageId.getEntryId());
+            Awaitility.await().untilAsserted(() -> Assert.assertEquals(
+                    deduplication.highestReplPositionPersisted.get(shadowProducerName), olderPosition));
+
+            // The shadow topic shares the source ledger, so a reload must recover the watermark by replaying
+            // the source entries rather than from a dedup snapshot (which is disabled here).
+            admin.topics().unload(shadowTopicName);
+            PersistentTopic reloadedTopic = (PersistentTopic) pulsar.getBrokerService()
+                    .getTopic(shadowTopicName, false).get(10, TimeUnit.SECONDS).orElseThrow();
+            MessageDeduplication recovered = reloadedTopic.getMessageDeduplication();
+            Awaitility.await().untilAsserted(() -> assertTrue(recovered.isEnabled()));
+            Assert.assertEquals(recovered.highestReplPositionPushed.get(shadowProducerName), olderPosition,
+                    "Shadow reload must recover the source entry position from the shared ledger");
+            Assert.assertEquals(recovered.highestReplPositionPersisted.get(shadowProducerName), olderPosition);
+
+            // Retrying the older entry through the shadow producer name must be recognized as a duplicate.
+            MessageMetadata retryMetadata = new MessageMetadata()
+                    .setProducerName(producerName)
+                    .setSequenceId(8L)
+                    .setPublishTime(System.currentTimeMillis());
+            retryMetadata.addProperty().setKey(MSG_PROP_REPL_SOURCE_POSITION)
+                    .setValue(olderMessageId.getLedgerId() + ":" + olderMessageId.getEntryId());
+            Assert.assertEquals(publishShadowMessage(reloadedTopic, shadowProducerName, retryMetadata, true),
+                    PositionFactory.create(-1L, -1L));
+            Assert.assertEquals(reloadedTopic.getManagedLedger().getLastConfirmedEntry(),
+                    PositionFactory.create(
+                            olderMessageId.getLedgerId(), olderMessageId.getEntryId()));
+        } finally {
+            configuration.setBrokerDeduplicationSnapshotIntervalSeconds(originalSnapshotInterval);
+            configuration.setBrokerDeduplicationEntriesInterval(originalEntriesInterval);
+        }
+    }
+
+    private static Position publishShadowMessage(PersistentTopic shadowTopic, String shadowProducerName,
+                                                MessageMetadata metadata, boolean supportsReplDedupByLidAndEid)
+            throws Exception {
+        CompletableFuture<Position> completed = new CompletableFuture<>();
+        ByteBuf entry = serializeMetadataAndPayload(Commands.ChecksumType.Crc32c, metadata, Unpooled.EMPTY_BUFFER);
+        try {
+            shadowTopic.publishMessage(entry, new Topic.PublishContext() {
+                private final Map<String, Object> properties = new HashMap<>();
+
+                @Override
+                public String getProducerName() {
+                    return shadowProducerName;
+                }
+
+                @Override
+                public long getSequenceId() {
+                    return metadata.getSequenceId();
+                }
+
+                @Override
+                public boolean supportsReplDedupByLidAndEid() {
+                    return supportsReplDedupByLidAndEid;
+                }
+
+                @Override
+                public void setProperty(String name, Object value) {
+                    properties.put(name, value);
+                }
+
+                @Override
+                public Object getProperty(String name) {
+                    return properties.get(name);
+                }
+
+                @Override
+                public void completed(Exception exception, long ledgerId, long entryId) {
+                    if (exception == null) {
+                        completed.complete(PositionFactory.create(ledgerId, entryId));
+                    } else {
+                        completed.completeExceptionally(exception);
+                    }
+                }
+            });
+            return completed.get(10, TimeUnit.SECONDS);
+        } finally {
+            entry.release();
+        }
     }
 
     @Test

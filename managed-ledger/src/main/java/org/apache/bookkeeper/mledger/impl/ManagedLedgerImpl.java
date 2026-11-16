@@ -5423,7 +5423,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         long stamp = lastPositionAndCounterLock.writeLock();
         try {
             ENTRIES_ADDED_COUNTER_UPDATER.incrementAndGet(this);
-            lastConfirmedEntry = addedEntry;
+            // Opening a source ledger can expose entries before their shadow notifications arrive.
+            // Retried notifications, including markers, must not move that readable boundary backwards.
+            if (!(this instanceof ShadowManagedLedgerImpl) || addedEntry.compareTo(lastConfirmedEntry) > 0) {
+                lastConfirmedEntry = addedEntry;
+            }
         } finally {
             lastPositionAndCounterLock.unlockWrite(stamp);
         }
