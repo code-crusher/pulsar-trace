@@ -297,6 +297,11 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
         return delayedMessagesCount.get();
     }
 
+    @Override
+    public long getLastDelayedMessageTimestamp() {
+        return highestDeliveryTimeTracked;
+    }
+
     /**
      * Estimates memory usage of all bitmaps in the tracker.
      * Uses serialized size as an approximation of memory usage.

@@ -403,6 +403,9 @@ class TopicStats {
             writeSubscriptionMetric(stream, "pulsar_subscription_delayed_message_index_size_bytes",
                 subsStats.delayedMessageIndexSizeInBytes, cluster, namespace, topic, sub,
                 splitTopicAndPartitionIndexLabel, customLabelsAndValues);
+            writeSubscriptionMetric(stream, "pulsar_subscription_last_delayed_message_timestamp",
+                subsStats.lastDelayedMessageTimestamp, cluster, namespace, topic, sub,
+                splitTopicAndPartitionIndexLabel, customLabelsAndValues);
 
             // write dispatch throttling metrics with `reason` labels to identify specific throttling
             // causes: by subscription limit, by topic limit, or by broker limit.

@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.broker.stats;
 
+import static org.apache.pulsar.broker.stats.BrokerOpenTelemetryTestUtil.assertMetricLongGaugeValue;
 import static org.apache.pulsar.broker.stats.BrokerOpenTelemetryTestUtil.assertMetricLongSumValue;
 import static org.assertj.core.api.Assertions.assertThat;
 import io.opentelemetry.api.common.Attributes;
@@ -125,6 +126,49 @@ public class OpenTelemetryTopicStatsTest extends BrokerTestBase {
 
         assertMetricLongSumValue(metrics, OpenTelemetryTopicStats.STORAGE_OUT_COUNTER, attributes, messageCount);
         assertMetricLongSumValue(metrics, OpenTelemetryTopicStats.STORAGE_IN_COUNTER, attributes, messageCount);
+    }
+
+    @Test(timeOut = 30_000)
+    public void testLastDelayedMessageTimestampMetric() throws Exception {
+        var topicName = BrokerTestUtil.newUniqueName("persistent://prop/ns-abc/testLastDelayedMessageTimestamp");
+        admin.topics().createNonPartitionedTopic(topicName);
+        var subName = "test";
+
+        @Cleanup
+        var producer = pulsarClient.newProducer().topic(topicName).create();
+        // Two delayed messages with different delivery times, plus one immediate message.
+        producer.newMessage().value("delayed-1".getBytes()).deliverAfter(30, TimeUnit.SECONDS).send();
+        producer.newMessage().value("immediate".getBytes()).send();
+        producer.newMessage().value("delayed-2".getBytes()).deliverAfter(60, TimeUnit.SECONDS).send();
+
+        @Cleanup
+        var consumer = pulsarClient.newConsumer().topic(topicName)
+                .subscriptionName(subName)
+                .subscriptionType(SubscriptionType.Shared)
+                .subscribe();
+
+        // Wait for the delayed messages to be tracked by the dispatcher.
+        Awaitility.await().untilAsserted(() -> assertThat(
+                admin.topics().getStats(topicName).getSubscriptions().get(subName).getMsgDelayed())
+                .isEqualTo(2));
+
+        var attributes = Attributes.builder()
+                .put(OpenTelemetryAttributes.PULSAR_DOMAIN, "persistent")
+                .put(OpenTelemetryAttributes.PULSAR_TENANT, "prop")
+                .put(OpenTelemetryAttributes.PULSAR_NAMESPACE, "prop/ns-abc")
+                .put(OpenTelemetryAttributes.PULSAR_TOPIC, topicName)
+                .put(OpenTelemetryAttributes.PULSAR_SUBSCRIPTION_NAME, subName)
+                .build();
+
+        var metrics = pulsarTestContext.getOpenTelemetryMetricReader().collectAllMetrics();
+        // The last delayed message timestamp is a point-in-time gauge of the farthest-in-the-future delivery
+        // time. The two delayed messages were scheduled at now+30s and now+60s, so the last one is now+60s.
+        assertMetricLongGaugeValue(metrics, OpenTelemetryTopicStats.LAST_DELAYED_MESSAGE_TIMESTAMP, attributes,
+                actual -> {
+                    long expected = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);
+                    assertThat(actual).isPositive();
+                    assertThat(Math.abs(actual - expected)).isLessThan(TimeUnit.SECONDS.toMillis(60));
+                });
     }
 
     @Test(timeOut = 30_000)

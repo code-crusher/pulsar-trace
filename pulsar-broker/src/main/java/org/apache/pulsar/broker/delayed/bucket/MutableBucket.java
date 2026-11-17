@@ -153,6 +153,10 @@ class MutableBucket implements AutoCloseable {
         bucket.setLastSegmentEntryId(lastSegmentEntryId);
         bucket.setFirstScheduleTimestamps(firstScheduleTimestamps);
         bucket.setDelayedIndexBitMap(immutableBucketBitMap);
+        if (lastSegmentEntryId > 0) {
+            bucket.setLastDelayedMessageTimestamp(
+                    bucketSnapshotMetadata.getMetadataAt(lastSegmentEntryId - 1).getMaxScheduleTimestamp());
+        }
 
         // Skip first segment, because it has already been loaded
         List<SnapshotSegment> snapshotSegments = bucketSnapshotSegments.subList(1, bucketSnapshotSegments.size());

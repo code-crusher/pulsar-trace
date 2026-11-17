@@ -621,9 +621,28 @@ public class PersistentTopicTest extends BrokerTestBase {
             Assert.assertEquals(topicLevelNum, 0);
         }
 
+        // The last delayed message timestamp must be exposed at the subscription level. Since all messages
+        // were published with a 30s deliverAfter, the timestamp of the last delayed message is roughly now+30s.
+        if (exposeTopicLevelMetrics) {
+            Collection<Metric> lastDelayedTimestampMetrics =
+                    metricsMap.get("pulsar_subscription_last_delayed_message_timestamp");
+            assertFalse(lastDelayedTimestampMetrics.isEmpty());
+            long expectedLastTimestamp = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
+            for (Metric metric : lastDelayedTimestampMetrics) {
+                if (metric.tags.get("topic").equals(topic)
+                        && subName.equals(metric.tags.get("subscription"))) {
+                    Assert.assertTrue(metric.value > 0);
+                    // Allow up to a minute of slack (broker processing time) beyond the 30s delay.
+                    Assert.assertTrue(Math.abs(metric.value - expectedLastTimestamp) < TimeUnit.SECONDS.toMillis(60),
+                            "unexpected lastDelayedMessageTimestamp: " + metric.value);
+                }
+            }
+        }
+
         TopicStats stats = admin.topics().getStats(topic);
         assertTrue(stats.getSubscriptions().get("test_sub").getDelayedMessageIndexSizeInBytes() > 0);
         assertTrue(stats.getDelayedMessageIndexSizeInBytes() > 0);
+        assertTrue(stats.getSubscriptions().get("test_sub").getLastDelayedMessageTimestamp() > 0);
     }
 
     @Test

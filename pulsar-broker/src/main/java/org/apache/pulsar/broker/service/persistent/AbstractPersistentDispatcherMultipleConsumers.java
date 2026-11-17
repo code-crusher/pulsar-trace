@@ -128,6 +128,12 @@ public abstract class AbstractPersistentDispatcherMultipleConsumers extends Abst
 
     public abstract Map<String, TopicMetricBean> getBucketDelayedIndexStats();
 
+    /**
+     * @return the delivery timestamp of the last (farthest in the future) delayed message tracked by this
+     *         dispatcher's delayed delivery tracker, or {@code 0} when there are no delayed messages.
+     */
+    public abstract long getLastDelayedMessageTimestamp();
+
     static long getTotalBytesSize(List<Entry> entries) {
         long totalBytesSize = 0;
         for (int i = 0, entriesSize = entries.size(); i < entriesSize; i++) {

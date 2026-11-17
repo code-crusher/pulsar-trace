@@ -52,6 +52,12 @@ public interface DelayedDeliveryTracker extends AutoCloseable {
     long getNumberOfDelayedMessages();
 
     /**
+     * @return the delivery timestamp of the last (farthest in the future) delayed message being tracked,
+     *         or {@code 0} when the tracker holds no delayed messages.
+     */
+    long getLastDelayedMessageTimestamp();
+
+    /**
      * The amount of memory used to back the delayed message index.
      */
     long getBufferMemoryUsage();
@@ -109,6 +115,11 @@ public interface DelayedDeliveryTracker extends AutoCloseable {
 
         @Override
         public long getNumberOfDelayedMessages() {
+            return 0;
+        }
+
+        @Override
+        public long getLastDelayedMessageTimestamp() {
             return 0;
         }
 

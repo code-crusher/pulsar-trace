@@ -1592,6 +1592,8 @@ public class PersistentSubscription extends AbstractSubscription {
         if (dispatcher instanceof AbstractPersistentDispatcherMultipleConsumers) {
             subStats.delayedMessageIndexSizeInBytes =
                     ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getDelayedTrackerMemoryUsage();
+            subStats.lastDelayedMessageTimestamp =
+                    ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getLastDelayedMessageTimestamp();
 
             subStats.bucketDelayedIndexStats =
                     ((AbstractPersistentDispatcherMultipleConsumers) dispatcher).getBucketDelayedIndexStats();

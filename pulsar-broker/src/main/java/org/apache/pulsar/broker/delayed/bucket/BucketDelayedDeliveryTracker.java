@@ -132,6 +132,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
     private final BucketDelayedMessageIndexStats stats;
 
+    // Delivery timestamp of the last (farthest in the future) delayed message added to the tracker. Updated only
+    // when a message is added: since messages are delivered in ascending delivery-time order, the highest added
+    // timestamp is also the highest remaining timestamp until the tracker is cleared. Reset to 0 on clear().
+    private final AtomicLong lastDelayedMessageTimestamp = new AtomicLong(0);
+
     private CompletableFuture<Void> pendingLoad = null;
 
     private final Set<CompletableFuture<Void>> pendingDeletes = ConcurrentHashMap.newKeySet();
@@ -322,6 +327,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                             this.sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
                                     index.getEntryId());
                         }
+                        // Only the first unexpired segment is loaded into the shared queue, but the last
+                        // delayed message timestamp of the bucket comes from the snapshot metadata, which
+                        // covers all remaining segments.
+                        this.lastDelayedMessageTimestamp.accumulateAndGet(
+                                immutableBucket.getLastDelayedMessageTimestamp(), Math::max);
                     }
                 }
 
@@ -538,6 +548,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
             sharedBucketPriorityQueue.add(deliverAt, ledgerId, entryId);
         }
         index.track(ledgerId, entryId);
+        lastDelayedMessageTimestamp.accumulateAndGet(deliverAt, Math::max);
             log.debug()
                     .attr("ledgerId", ledgerId)
                     .attr("entryId", entryId)
@@ -746,6 +757,13 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     }
 
     @Override
+    public long getLastDelayedMessageTimestamp() {
+        // The high-water mark is kept from the last clear() even when delivery has drained the tracker, so
+        // return 0 when no delayed messages remain, matching the InMemoryDelayedDeliveryTracker semantics.
+        return index.size() > 0 ? lastDelayedMessageTimestamp.get() : 0;
+    }
+
+    @Override
     public long getBufferMemoryUsage() {
         return this.lastMutableBucket.getBufferMemoryUsage() + sharedBucketPriorityQueue.bytesCapacity();
     }
@@ -950,6 +968,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                                     index.clear();
                                     lastMutableBucket.clear();
                                     snapshotSegmentLastIndexMap.clear();
+                                    lastDelayedMessageTimestamp.set(0);
                                     return future;
                                 }
                             });

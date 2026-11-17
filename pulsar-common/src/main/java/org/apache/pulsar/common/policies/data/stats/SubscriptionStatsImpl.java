@@ -163,6 +163,12 @@ public class SubscriptionStatsImpl implements SubscriptionStats {
     /** The size of DelayedDeliveryTracer memory usage. */
     public long delayedMessageIndexSizeInBytes;
 
+    /**
+     * The delivery timestamp of the last (farthest in the future) delayed message tracked by the subscription,
+     * or {@code 0} when there are no delayed messages.
+     */
+    public long lastDelayedMessageTimestamp;
+
     @JsonIgnore
     public Map<String, TopicMetricBean> bucketDelayedIndexStats;
 
@@ -230,6 +236,7 @@ public class SubscriptionStatsImpl implements SubscriptionStats {
         earliestMsgPublishTimeInBacklog = 0L;
         oldestBacklogMessageAgeSeconds = -1;
         delayedMessageIndexSizeInBytes = 0;
+        lastDelayedMessageTimestamp = 0;
         subscriptionProperties.clear();
         filterProcessedMsgCount = 0;
         filterAcceptedMsgCount = 0;
@@ -297,6 +304,7 @@ public class SubscriptionStatsImpl implements SubscriptionStats {
         this.oldestBacklogMessageAgeSeconds = Math.max(
                 this.oldestBacklogMessageAgeSeconds, stats.oldestBacklogMessageAgeSeconds);
         this.delayedMessageIndexSizeInBytes += stats.delayedMessageIndexSizeInBytes;
+        this.lastDelayedMessageTimestamp = Math.max(this.lastDelayedMessageTimestamp, stats.lastDelayedMessageTimestamp);
         this.subscriptionProperties.putAll(stats.subscriptionProperties);
         this.filterProcessedMsgCount += stats.filterProcessedMsgCount;
         this.filterAcceptedMsgCount += stats.filterAcceptedMsgCount;

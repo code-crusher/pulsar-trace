@@ -99,5 +99,7 @@ public class AggregatedSubscriptionStats {
 
     long delayedMessageIndexSizeInBytes;
 
+    long lastDelayedMessageTimestamp;
+
     public Map<String, TopicMetricBean> bucketDelayedIndexStats = new HashMap<>();
 }

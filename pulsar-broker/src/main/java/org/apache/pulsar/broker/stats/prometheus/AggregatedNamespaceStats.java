@@ -162,6 +162,8 @@ public class AggregatedNamespaceStats {
             subsStats.dispatchThrottledMsgEventsByTopicLimit += as.dispatchThrottledMsgEventsByTopicLimit;
             subsStats.dispatchThrottledBytesEventsByTopicLimit += as.dispatchThrottledBytesEventsByTopicLimit;
             subsStats.delayedMessageIndexSizeInBytes += as.delayedMessageIndexSizeInBytes;
+            subsStats.lastDelayedMessageTimestamp = Math.max(subsStats.lastDelayedMessageTimestamp,
+                    as.lastDelayedMessageTimestamp);
             as.bucketDelayedIndexStats.forEach((k, v) -> {
                 TopicMetricBean topicMetricBean =
                         subsStats.bucketDelayedIndexStats.computeIfAbsent(k, __ -> new TopicMetricBean());
@@ -234,6 +236,7 @@ public class AggregatedNamespaceStats {
         compactionCompactedEntriesSize = 0;
 
         delayedMessageIndexSizeInBytes = 0;
+        lastDelayedMessageTimestamp = 0;
         bucketDelayedIndexStats.clear();
     }
 }

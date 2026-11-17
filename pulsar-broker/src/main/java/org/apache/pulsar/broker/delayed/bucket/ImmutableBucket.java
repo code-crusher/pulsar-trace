@@ -88,6 +88,14 @@ class ImmutableBucket {
     @Setter
     private volatile long snapshotLength;
 
+    /**
+     * The delivery timestamp of the last (farthest in the future) delayed message in this bucket's snapshot,
+     * as recorded in the snapshot metadata. Set during snapshot creation and recovery.
+     */
+    @Getter
+    @Setter
+    private volatile long lastDelayedMessageTimestamp;
+
     @Setter
     private volatile Long bucketId;
 
@@ -215,6 +223,14 @@ class ImmutableBucket {
                         }
 
                         this.setLastSegmentEntryId(metadataListSize);
+                        // Segments hold messages in ascending delivery-time order, so the last segment's
+                        // max schedule timestamp is the delivery timestamp of the last delayed message in
+                        // this bucket snapshot. Messages are delivered in ascending order, so this remains
+                        // the bucket's last delayed message timestamp until the bucket is fully delivered.
+                        if (metadataListSize > 0) {
+                            this.setLastDelayedMessageTimestamp(
+                                    snapshotMetadata.getMetadataAt(metadataListSize - 1).getMaxScheduleTimestamp());
+                        }
                         this.recoverDelayedIndexBitMapAndNumber(nextSnapshotEntryIndex, snapshotMetadata);
                         List<Long> firstScheduleTimestamps = new ArrayList<>();
                         for (int i = 0; i < metadataListSize; i++) {

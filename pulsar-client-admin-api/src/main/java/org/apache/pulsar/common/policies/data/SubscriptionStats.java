@@ -174,6 +174,12 @@ public interface SubscriptionStats {
     long getDelayedMessageIndexSizeInBytes();
 
     /**
+     * The delivery timestamp of the last (farthest in the future) delayed message tracked by the subscription,
+     * or {@code 0} when there are no delayed messages.
+     */
+    long getLastDelayedMessageTimestamp();
+
+    /**
      * Gets the total number of times message dispatching was throttled on a subscription
      * due to subscription rate limits.
      * @return the count of throttled message events by subscription limit, default is 0.

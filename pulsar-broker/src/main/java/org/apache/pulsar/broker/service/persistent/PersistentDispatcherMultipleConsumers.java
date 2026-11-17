@@ -1857,6 +1857,20 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
         return delayedDeliveryTracker.map(DelayedDeliveryTracker::getBufferMemoryUsage).orElse(0L);
     }
 
+    @Override
+    public long getLastDelayedMessageTimestamp() {
+        // While the tracker is being created the pending messages wait in messagesPendingDelayedDeliveryTracker
+        // with their delivery times, so the max of the pending delivery times and the tracker's value is the
+        // delivery timestamp of the last delayed message.
+        long maxPendingDelayedTimestamp = messagesPendingDelayedDeliveryTracker.values().stream()
+                .mapToLong(Long::longValue)
+                .max()
+                .orElse(0L);
+        long trackerTimestamp = delayedDeliveryTracker.map(DelayedDeliveryTracker::getLastDelayedMessageTimestamp)
+                .orElse(0L);
+        return Math.max(maxPendingDelayedTimestamp, trackerTimestamp);
+    }
+
     public Map<String, TopicMetricBean> getBucketDelayedIndexStats() {
         return delayedDeliveryTracker
                 .filter(BucketDelayedDeliveryTracker.class::isInstance)

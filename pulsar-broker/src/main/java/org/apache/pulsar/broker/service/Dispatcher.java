@@ -132,6 +132,14 @@ public interface Dispatcher {
         return 0;
     }
 
+    /**
+     * @return the delivery timestamp of the last (farthest in the future) delayed message tracked by this
+     *         dispatcher's delayed delivery tracker, or {@code 0} when there are no delayed messages.
+     */
+    default long getLastDelayedMessageTimestamp() {
+        return 0;
+    }
+
     default CompletableFuture<Void> clearDelayedMessages() {
         return CompletableFuture.completedFuture(null);
     }

@@ -69,6 +69,7 @@ public abstract class AbstractDeliveryTrackerTest {
     @Test(dataProvider = "delayedTracker")
     public void test(DelayedDeliveryTracker tracker) throws Exception {
         assertFalse(tracker.hasMessageAvailable());
+        assertEquals(tracker.getLastDelayedMessageTimestamp(), 0);
 
         assertTrue(tracker.addMessage(1, 2, 20));
         assertTrue(tracker.addMessage(2, 1, 10));
@@ -78,6 +79,7 @@ public abstract class AbstractDeliveryTrackerTest {
 
         assertFalse(tracker.hasMessageAvailable());
         assertEquals(tracker.getNumberOfDelayedMessages(), 5);
+        assertEquals(tracker.getLastDelayedMessageTimestamp(), 50);
 
         assertEquals(tracker.getScheduledMessages(10), Collections.emptySet());
 
@@ -108,6 +110,8 @@ public abstract class AbstractDeliveryTrackerTest {
         assertEquals(tracker.getNumberOfDelayedMessages(), 0);
         assertFalse(tracker.hasMessageAvailable());
         assertEquals(tracker.getScheduledMessages(10), Collections.emptySet());
+        // The tracker is empty, so the last delayed message timestamp must be 0.
+        assertEquals(tracker.getLastDelayedMessageTimestamp(), 0);
 
         tracker.close();
     }

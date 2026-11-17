@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.broker.stats;
 
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.BatchCallback;
 import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
@@ -35,6 +36,7 @@ import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.stats.MetricsUtil;
 import org.apache.pulsar.compaction.CompactedTopicContext;
 import org.apache.pulsar.compaction.Compactor;
+import org.apache.pulsar.opentelemetry.OpenTelemetryAttributes;
 
 public class OpenTelemetryTopicStats implements AutoCloseable {
 
@@ -159,6 +161,11 @@ public class OpenTelemetryTopicStats implements AutoCloseable {
     // Replaces pulsar_subscription_delayed
     public static final String DELAYED_SUBSCRIPTION_COUNTER = "pulsar.broker.topic.subscription.delayed.entry.count";
     private final ObservableLongMeasurement delayedSubscriptionCounter;
+
+    // Replaces pulsar_subscription_last_delayed_message_timestamp
+    public static final String LAST_DELAYED_MESSAGE_TIMESTAMP =
+            "pulsar.broker.topic.subscription.delayed.last.message.timestamp";
+    private final ObservableLongMeasurement lastDelayedMessageTimestamp;
 
     // Omitted: pulsar_delayed_message_index_size_bytes
 
@@ -352,6 +359,14 @@ public class OpenTelemetryTopicStats implements AutoCloseable {
                 .setDescription("The total number of message batches (entries) delayed for dispatching.")
                 .buildObserver();
 
+        lastDelayedMessageTimestamp = meter
+                .gaugeBuilder(LAST_DELAYED_MESSAGE_TIMESTAMP)
+                .ofLongs()
+                .setUnit("ms")
+                .setDescription("The delivery timestamp of the last (farthest in the future) delayed message"
+                        + " of the subscription, or 0 when there are no delayed messages.")
+                .buildObserver();
+
         batchCallback = meter.batchCallback(() -> pulsar.getBrokerService()
                         .getTopics()
                         .values()
@@ -385,7 +400,8 @@ public class OpenTelemetryTopicStats implements AutoCloseable {
                 compactionBytesCounter,
                 transactionCounter,
                 transactionBufferClientOperationCounter,
-                delayedSubscriptionCounter);
+                delayedSubscriptionCounter,
+                lastDelayedMessageTimestamp);
     }
 
     @Override
@@ -496,6 +512,19 @@ public class OpenTelemetryTopicStats implements AutoCloseable {
                 .mapToLong(Dispatcher::getNumberOfDelayedMessages)
                 .sum();
             delayedSubscriptionCounter.record(delayedMessages, attributes);
+
+            // The last delayed message timestamp is per-subscription since each subscription has its own
+            // delayed delivery tracker.
+            topic.getSubscriptions().forEach((subName, subscription) -> {
+                Dispatcher dispatcher = subscription.getDispatcher();
+                if (dispatcher != null) {
+                    var subAttributes = Attributes.builder()
+                            .putAll(attributes)
+                            .put(OpenTelemetryAttributes.PULSAR_SUBSCRIPTION_NAME, subName)
+                            .build();
+                    lastDelayedMessageTimestamp.record(dispatcher.getLastDelayedMessageTimestamp(), subAttributes);
+                }
+            });
         }
     }
 }
