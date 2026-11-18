@@ -21,6 +21,7 @@ package org.apache.pulsar.broker.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -1179,6 +1180,11 @@ public class PersistentMessageFinderTest extends MockedBookKeeperTestCase {
 
         ManagedCursorImpl mockCursor = mock(ManagedCursorImpl.class);
         doReturn("cursor").when(mockCursor).getName();
+        ManagedLedger mockLedger = mock(ManagedLedger.class);
+        // The mock ledger cannot confirm the position, so expireMessages falls back to searching a position
+        // with asyncFindNewestMatching, which the stub below never completes.
+        doReturn(mockLedger).when(mockCursor).getManagedLedger();
+        doReturn(Optional.empty()).when(mockLedger).getOptionalLedgerInfo(anyLong());
         PersistentMessageExpiryMonitor mockMonitor = spy(new PersistentMessageExpiryMonitor(topic,
                 cursor.getName(), mockCursor, subscription));
         // Not calling findEntryComplete to clear expirationCheckInProgress condition, so following call to

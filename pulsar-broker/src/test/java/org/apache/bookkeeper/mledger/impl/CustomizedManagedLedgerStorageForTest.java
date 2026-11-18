@@ -29,6 +29,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import lombok.AllArgsConstructor;
@@ -697,6 +698,11 @@ public class CustomizedManagedLedgerStorageForTest extends ManagedLedgerClientFa
 
         private final ManagedCursorImpl delegate;
         public Map<EntryImpl, Boolean> entryReleasedStatusMap = new ConcurrentHashMap<>();
+        /**
+         * Counts the calls to {@link #asyncFindNewestMatching} on this cursor, which the message expiry runs to
+         * search the position to expire up to, when the expiry does not share the position between subscriptions.
+         */
+        public final AtomicInteger findNewestMatchingCallCount = new AtomicInteger();
 
         public ManagedCursorDecorator(ManagedCursorImpl delegate) {
             this.delegate = delegate;
@@ -956,6 +962,7 @@ public class CustomizedManagedLedgerStorageForTest extends ManagedLedgerClientFa
         @Override
         public void asyncFindNewestMatching(FindPositionConstraint constraint, Predicate<Entry> condition,
                                             AsyncCallbacks.FindEntryCallback callback, Object ctx) {
+            findNewestMatchingCallCount.incrementAndGet();
             delegate.asyncFindNewestMatching(constraint, condition, callback, ctx);
         }
 
@@ -963,6 +970,7 @@ public class CustomizedManagedLedgerStorageForTest extends ManagedLedgerClientFa
         public void asyncFindNewestMatching(FindPositionConstraint constraint, Predicate<Entry> condition,
                                             AsyncCallbacks.FindEntryCallback callback, Object ctx,
                                             boolean isFindFromLedger) {
+            findNewestMatchingCallCount.incrementAndGet();
             delegate.asyncFindNewestMatching(constraint, condition, callback, ctx, isFindFromLedger);
         }
 

@@ -94,7 +94,6 @@ import org.apache.bookkeeper.mledger.PositionBound;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorContainer;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorContainer.CursorInfo;
-import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo;
 import org.apache.bookkeeper.mledger.util.Futures;
 import org.apache.commons.collections4.CollectionUtils;
@@ -2642,11 +2641,13 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
             return;
         }
 
-        ManagedLedger managedLedger = getManagedLedger();
-        if (managedLedger instanceof ManagedLedgerImpl ml) {
-            checkMessageExpiryWithSharedPosition(ml, messageTtlInSeconds);
+        // The shared position can only be found if the cursors are tracked in a container that knows the slowest
+        // one. Any ManagedLedger implementation that returns such a container from getCursors() benefits from the
+        // optimization, not only ManagedLedgerImpl.
+        if (getManagedLedger().getCursors() instanceof ManagedCursorContainer managedCursorContainer) {
+            checkMessageExpiryWithSharedPosition(managedCursorContainer, messageTtlInSeconds);
         } else {
-            // Fallback to the slower solution if managed ledger is not an instance of ManagedLedgerImpl: each
+            // Fallback to the slower solution if the cursors are not tracked in a ManagedCursorContainer: each
             // subscription find position and handle expiring itself.
             checkMessageExpiryWithoutSharedPosition(messageTtlInSeconds);
         }
@@ -2668,9 +2669,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 -> ((PersistentReplicator) replicator).expireMessagesAsync(messageTtlInSeconds));
     }
 
-    private void checkMessageExpiryWithSharedPosition(ManagedLedgerImpl ml, int messageTtlInSeconds) {
+    private void checkMessageExpiryWithSharedPosition(ManagedCursorContainer managedCursorContainer,
+                                                      int messageTtlInSeconds) {
         // Find the target position at one time, then expire all subscriptions and replicators.
-        final var cursorWithOldestPosition = ml.getCursors().getCursorWithOldestPosition();
+        final var cursorWithOldestPosition = managedCursorContainer.getCursorWithOldestPosition();
         if (cursorWithOldestPosition == null) {
             // Skip checking message expiry for topics without subscription
             return;

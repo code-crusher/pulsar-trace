@@ -36,7 +36,6 @@ import org.apache.bookkeeper.mledger.ManagedLedgerException.LedgerNotExistExcept
 import org.apache.bookkeeper.mledger.ManagedLedgerException.NonRecoverableLedgerException;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
-import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.service.Dispatcher;
@@ -152,23 +151,22 @@ public class PersistentMessageExpiryMonitor implements FindEntryCallback, Messag
         // If it's beyond last position of this topic, do nothing.
         Position topicLastPosition = this.topic.getLastPosition();
         ManagedLedger managedLedger = cursor.getManagedLedger();
-        if (managedLedger instanceof ManagedLedgerImpl ml) {
-            // Confirm the position is valid.
-            Optional<ManagedLedgerInfo.LedgerInfo> ledgerInfoOptional =
-                    ml.getOptionalLedgerInfo(messagePosition.getLedgerId());
-            if (ledgerInfoOptional.isPresent() && messagePosition.getEntryId() >= 0) {
-                // The ledger info of the current ledger only gets its entry count when the ledger closes, so an
-                // entry of the current ledger is checked against the last confirmed entry instead.
-                Position lastConfirmedEntry = ml.getLastConfirmedEntry();
-                if (ledgerInfoOptional.get().getEntries() - 1 >= messagePosition.getEntryId()
-                        || (messagePosition.getLedgerId() == lastConfirmedEntry.getLedgerId()
-                        && messagePosition.getEntryId() <= lastConfirmedEntry.getEntryId())) {
-                    findEntryComplete(messagePosition, null);
-                    return true;
-                }
+        // Confirm the position is valid.
+        Optional<ManagedLedgerInfo.LedgerInfo> ledgerInfoOptional =
+                managedLedger.getOptionalLedgerInfo(messagePosition.getLedgerId());
+        if (ledgerInfoOptional.isPresent() && messagePosition.getEntryId() >= 0) {
+            // The ledger info of the current ledger only gets its entry count when the ledger closes, so an
+            // entry of the current ledger is checked against the last confirmed entry instead.
+            Position lastConfirmedEntry = managedLedger.getLastConfirmedEntry();
+            if (ledgerInfoOptional.get().getEntries() - 1 >= messagePosition.getEntryId()
+                    || (messagePosition.getLedgerId() == lastConfirmedEntry.getLedgerId()
+                    && messagePosition.getEntryId() <= lastConfirmedEntry.getEntryId())) {
+                findEntryComplete(messagePosition, null);
+                return true;
             }
         }
-        // Fallback to the slower solution if the managed ledger is not an instance of ManagedLedgerImpl.
+        // The position is not valid for this managed ledger, or the managed ledger could not confirm it: fall back
+        // to the slower solution.
         if (topicLastPosition.compareTo(messagePosition) < 0) {
             log.debug()
                     .attr("messagePosition", messagePosition)
