@@ -132,10 +132,13 @@ public class NonPersistentSubscription extends AbstractSubscription {
                 break;
             case Failover:
                 int partitionIndex = TopicName.getPartitionIndex(topicName);
-                if (partitionIndex < 0) {
+                if (partitionIndex < 0 && !topic.getBrokerService().pulsar().getConfiguration()
+                        .isActiveConsumerFailoverSubscriptionOrder()) {
                     // For non partition topics, assume index 0 to pick a predictable consumer
                     partitionIndex = 0;
                 }
+                // Otherwise pass -1, so the dispatcher picks the active consumer in subscription order when
+                // activeConsumerFailoverSubscriptionOrder is enabled.
 
                 if (dispatcher == null || dispatcher.getType() != SubType.Failover) {
                     previousDispatcher = dispatcher;

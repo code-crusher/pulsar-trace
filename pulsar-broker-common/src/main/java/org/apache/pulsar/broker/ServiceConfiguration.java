@@ -937,6 +937,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean activeConsumerFailoverConsistentHashing = false;
     @FieldContext(
             category = CATEGORY_POLICIES,
+            doc = "Select the active consumer of non-partitioned topics with Failover subscription type in the "
+                    + "order the consumers subscribed to the topic, instead of by consistent hashing. The first "
+                    + "consumer stays active until it disconnects; then the next consumer in line takes over. "
+                    + "It has no effect on partitioned topics."
+    )
+    private boolean activeConsumerFailoverSubscriptionOrder = false;
+    @FieldContext(
+            category = CATEGORY_POLICIES,
             doc = "Maximum time to spend while scanning a subscription to calculate the accurate backlog"
     )
     private long subscriptionBacklogScanMaxTimeMs = 1000 * 60 * 2L;

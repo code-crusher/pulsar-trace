@@ -244,4 +244,63 @@ public class NonPersistentDispatcherFailoverConsumerTest {
                 new ActiveChange(1, false),
                 new ActiveChange(2, false)));
     }
+
+    @Test(timeOut = 10000)
+    public void testActiveConsumerSelectedInSubscriptionOrderWhenEnabled() throws Exception {
+        pulsarTestContext.getPulsarService().getConfiguration().setActiveConsumerFailoverSubscriptionOrder(true);
+        // Non-partitioned topic: the subscription order selection is enabled by passing -1
+        TestDispatcher td = newDispatcher(SubType.Failover, -1);
+        NonPersistentDispatcherSingleActiveConsumer dispatcher = td.dispatcher();
+
+        Consumer consumer1 = newConsumer(td, SubType.Failover, 1, "Cons2");
+        dispatcher.addConsumer(consumer1).get();
+        assertSame(dispatcher.getActiveConsumer(), consumer1);
+        assertEquals(takeExactChanges(1), List.of(new ActiveChange(1, true)));
+
+        // A consumer with a lexicographically smaller name joining later must not displace the active one
+        Consumer consumer2 = newConsumer(td, SubType.Failover, 2, "Cons1");
+        dispatcher.addConsumer(consumer2).get();
+        assertSame(dispatcher.getActiveConsumer(), consumer1);
+        assertEquals(takeExactChanges(1), List.of(new ActiveChange(2, false)));
+
+        // The next consumer in line takes over when the active one disconnects.
+        // The removed consumer is no longer in the list, so only the new active consumer is notified.
+        dispatcher.removeConsumer(consumer1);
+        assertSame(dispatcher.getActiveConsumer(), consumer2);
+        assertEquals(takeExactChanges(1), List.of(new ActiveChange(2, true)));
+    }
+
+    @Test(timeOut = 10000)
+    public void testHigherPriorityConsumerBecomesActiveInSubscriptionOrderWhenEnabled() throws Exception {
+        pulsarTestContext.getPulsarService().getConfiguration().setActiveConsumerFailoverSubscriptionOrder(true);
+        TestDispatcher td = newDispatcher(SubType.Failover, -1);
+        NonPersistentDispatcherSingleActiveConsumer dispatcher = td.dispatcher();
+
+        Consumer consumer1 = newConsumer(td, SubType.Failover, 1, 1, "Cons1", serverCnx);
+        dispatcher.addConsumer(consumer1).get();
+        assertSame(dispatcher.getActiveConsumer(), consumer1);
+        assertEquals(takeExactChanges(1), List.of(new ActiveChange(1, true)));
+
+        Consumer consumer2 = newConsumer(td, SubType.Failover, 2, 1, "Cons2", serverCnx);
+        dispatcher.addConsumer(consumer2).get();
+        assertSame(dispatcher.getActiveConsumer(), consumer1);
+        assertEquals(takeExactChanges(1), List.of(new ActiveChange(2, false)));
+
+        // A higher priority consumer joining later still takes over. The consumers are not sorted, so they are
+        // notified in subscription order.
+        Consumer consumer3 = newConsumer(td, SubType.Failover, 3, 0, "Cons3", serverCnx);
+        dispatcher.addConsumer(consumer3).get();
+        assertSame(dispatcher.getActiveConsumer(), consumer3);
+        assertEquals(takeExactChanges(3), List.of(
+                new ActiveChange(1, false),
+                new ActiveChange(2, false),
+                new ActiveChange(3, true)));
+    }
+
+    private TestDispatcher newDispatcher(SubType subType, int partitionIndex) {
+        NonPersistentTopic topic = new NonPersistentTopic(TOPIC_NAME, pulsarTestContext.getBrokerService());
+        NonPersistentSubscription sub = new NonPersistentSubscription(topic, "sub-1", Collections.emptyMap());
+        return new TestDispatcher(topic, sub,
+                new NonPersistentDispatcherSingleActiveConsumer(subType, partitionIndex, topic, sub));
+    }
 }

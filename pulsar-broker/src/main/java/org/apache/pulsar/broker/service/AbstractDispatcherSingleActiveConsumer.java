@@ -118,7 +118,9 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
 
     /**
      * Pick active consumer for a topic for {@link SubType#Failover} subscription.
-     * If it's a non-partitioned topic then it'll pick consumer based on order they subscribe to the topic.
+     * If it's a non-partitioned topic then it'll pick consumer based on consistent hashing of the topic name and the
+     * consumer names, or in the order they subscribe to the topic when
+     * {@link ServiceConfiguration#isActiveConsumerFailoverSubscriptionOrder()} is enabled.
      * If is's a partitioned topic, first sort consumers based on their priority level and consumer name then
      * distributed partitions evenly across consumers with highest priority level.
      *
@@ -127,6 +129,26 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
      */
     protected boolean pickAndScheduleActiveConsumer() {
         checkArgument(!consumers.isEmpty());
+        if (partitionIndex < 0 && serviceConfig.isActiveConsumerFailoverSubscriptionOrder()) {
+            // Non-partitioned topic selecting the active consumer in subscription order: the consumers must not be
+            // sorted, the list order is the subscription order. A consumer joining later never displaces the active
+            // one, and when the active one disconnects the next consumer in line takes over.
+            Consumer selectedConsumer = consumers.get(0);
+            for (Consumer consumer : consumers) {
+                if (consumer.getPriorityLevel() < selectedConsumer.getPriorityLevel()) {
+                    selectedConsumer = consumer;
+                }
+            }
+            if (selectedConsumer == activeConsumer) {
+                // Active consumer did not change. Do nothing at this point
+                return false;
+            } else {
+                // If the active consumer is changed, send notification.
+                updateActiveConsumer(selectedConsumer);
+                scheduleReadOnActiveConsumer();
+                return true;
+            }
+        }
         AtomicBoolean hasPriorityConsumer = new AtomicBoolean(false);
         consumers.sort((c1, c2) -> {
             int priority = c1.getPriorityLevel() - c2.getPriorityLevel();

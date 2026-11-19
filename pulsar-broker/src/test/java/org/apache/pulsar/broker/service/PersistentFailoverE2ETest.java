@@ -635,6 +635,66 @@ public class PersistentFailoverE2ETest extends BrokerTestBase {
         }
     }
 
+    @Test
+    public void testNonPartitionedTopicActiveConsumerSelectedInSubscriptionOrder() throws Exception {
+        conf.setActiveConsumerFailoverSubscriptionOrder(true);
+        final String topicName = BrokerTestUtil.newUniqueName("persistent://prop/ns-abc/failover-sub-order");
+        final String subName = "sub1";
+        final int numMsgs = 10;
+        List<Consumer<byte[]>> consumers = new ArrayList<>();
+        try {
+            // Consumers join with names in reverse lexicographical order to prove the selection does not sort by name
+            Consumer<byte[]> consumer1 = pulsarClient.newConsumer().topic(topicName).subscriptionName(subName)
+                    .subscriptionType(SubscriptionType.Failover).consumerName("c2")
+                    .autoUpdatePartitions(false).subscribe();
+            consumers.add(consumer1);
+            Consumer<byte[]> consumer2 = pulsarClient.newConsumer().topic(topicName).subscriptionName(subName)
+                    .subscriptionType(SubscriptionType.Failover).consumerName("c1")
+                    .autoUpdatePartitions(false).subscribe();
+            consumers.add(consumer2);
+
+            // The first consumer stays active when another joins, and it receives the messages
+            Producer<byte[]> producer = pulsarClient.newProducer().topic(topicName)
+                    .enableBatching(false).create();
+            for (int i = 0; i < numMsgs; i++) {
+                producer.send(("my-message-" + i).getBytes());
+            }
+            List<String> received = new ArrayList<>();
+            Message<byte[]> msg;
+            while ((msg = consumer1.receive(1, TimeUnit.SECONDS)) != null) {
+                received.add(new String(msg.getData()));
+                consumer1.acknowledge(msg);
+            }
+            assertEquals(received.size(), numMsgs);
+            assertNull(consumer2.receive(200, TimeUnit.MILLISECONDS));
+            assertEquals(admin.topics().getStats(topicName).getSubscriptions().get(subName)
+                    .getActiveConsumerName(), "c2");
+
+            // The next consumer in line takes over when the active one disconnects
+            consumer1.close();
+            Awaitility.await().untilAsserted(() -> assertEquals(admin.topics().getStats(topicName)
+                    .getSubscriptions().get(subName).getActiveConsumerName(), "c1"));
+            for (int i = numMsgs; i < numMsgs * 2; i++) {
+                producer.send(("my-message-" + i).getBytes());
+            }
+            received.clear();
+            while ((msg = consumer2.receive(1, TimeUnit.SECONDS)) != null) {
+                received.add(new String(msg.getData()));
+                consumer2.acknowledge(msg);
+            }
+            assertEquals(received.size(), numMsgs);
+            producer.close();
+        } finally {
+            conf.setActiveConsumerFailoverSubscriptionOrder(false);
+            for (Consumer<byte[]> consumer : consumers) {
+                if (consumer != null) {
+                    consumer.close();
+                }
+            }
+            admin.topics().delete(topicName);
+        }
+    }
+
     // The broker's active consumer of every partition is the one picked by the balanced assignment
     private void assertBalancedAssignment(String topicName, String subName, int numPartitions, List<String> names) {
         int[] expected = AbstractDispatcherSingleActiveConsumer.balancedAssignment(topicName, numPartitions, names);
