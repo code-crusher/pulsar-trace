@@ -31,6 +31,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import lombok.CustomLog;
 import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.apache.zookeeper.AsyncCallback.StatCallback;
@@ -59,8 +60,15 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
 
     private final ScheduledExecutorService scheduler;
     private final ScheduledFuture<?> task;
+    private final LongSupplier nanoTime;
 
     private long disconnectedAt = 0;
+    // A slow probe is not a disconnect, but its first timeout must count if a disconnect is later confirmed.
+    private long firstUnansweredProbeAt = 0;
+    private HandleIdentity probeHandleIdentity;
+    // Recovery and confirmed disconnection invalidate callbacks from probes issued before that transition.
+    private long probeGeneration = 0;
+    private boolean closed;
     // Highest handle generation whose SyncConnected event has been processed. A terminal event from an older handle
     // remains relevant until a newer handle has actually reached the session watcher, not merely been published.
     private long lastConnectedHandleGeneration = UNKNOWN_HANDLE_GENERATION;
@@ -76,7 +84,14 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
 
     @VisibleForTesting
     ZKSessionWatcher(ZooKeeper zk, Consumer<SessionEvent> sessionListener, boolean startScheduler) {
+        this(zk, sessionListener, startScheduler, System::nanoTime);
+    }
+
+    @VisibleForTesting
+    ZKSessionWatcher(ZooKeeper zk, Consumer<SessionEvent> sessionListener, boolean startScheduler,
+                     LongSupplier nanoTime) {
         this.zk = zk;
+        this.nanoTime = nanoTime;
         this.monitorTimeoutMillis = zk.getSessionTimeout() * 5 / 6;
         this.tickTimeMillis = zk.getSessionTimeout() / 15;
         this.sessionListener = sessionListener;
@@ -97,6 +112,10 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
 
     @Override
     public void close() throws Exception {
+        synchronized (this) {
+            closed = true;
+            resetProbeTiming();
+        }
         if (task != null) {
             task.cancel(true);
         }
@@ -109,7 +128,10 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     @VisibleForTesting
     void checkConnectionStatus() {
         try {
-            HandleIdentity checkedHandleIdentity = getCurrentHandleIdentity();
+            Probe probe = beginProbe();
+            if (probe == null) {
+                return;
+            }
             CompletableFuture<StateSnapshot> future = new CompletableFuture<>();
             zk.exists("/", false, (StatCallback) (rc, path, ctx, stat) -> {
                 ZooKeeper.States clientState = zk.getState();
@@ -136,11 +158,24 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
             try {
                 stateSnapshot = future.get(tickTimeMillis, TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                // Consider zk disconnection if zk operation takes more than TICK_TIME
-                stateSnapshot = new StateSnapshot(KeeperState.Disconnected, zk.getState());
+                // A slow probe is not proof of a disconnection: the client state decides. If the client is connected,
+                // treat the probe as unanswered instead of reporting a connection loss, since the timeout can be
+                // shorter than the time ZooKeeper takes to answer under load.
+                ZooKeeper.States clientState = zk.getState();
+                stateSnapshot = new StateSnapshot(getKeeperState(clientState), clientState);
+                checkStateIfSameSession(probe, stateSnapshot, true);
+                // The response may arrive after this check returns. Clear only this outage's timing, without
+                // notifying listeners on the ZooKeeper event thread or letting an old callback reset a newer outage.
+                future.thenAccept(lateSnapshot -> {
+                    if (lateSnapshot.keeperState() == KeeperState.SyncConnected
+                            || lateSnapshot.keeperState() == KeeperState.ConnectedReadOnly) {
+                        clearTimedOutProbe(probe);
+                    }
+                });
+                return;
             }
 
-            checkStateIfSameSession(checkedHandleIdentity, stateSnapshot);
+            checkStateIfSameSession(probe, stateSnapshot, false);
         } catch (RejectedExecutionException | InterruptedException e) {
             if (task != null) {
                 task.cancel(true);
@@ -159,6 +194,9 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     }
 
     synchronized void process(SessionEventSnapshot stateSnapshot) {
+        if (closed) {
+            return;
+        }
         long currentHandleGeneration = zk instanceof PulsarZooKeeperClient
                 ? ((PulsarZooKeeperClient) zk).getCurrentHandleGeneration()
                 : UNKNOWN_HANDLE_GENERATION;
@@ -175,6 +213,9 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
                     .attr("currentSessionId", zk.getSessionId())
                     .log("Ignoring ZooKeeper session event from a stale handle");
             return;
+        }
+        if (!staleHandle && stateSnapshot.sessionId() == zk.getSessionId()) {
+            trackProbeHandle(new HandleIdentity(stateSnapshot.handleGeneration(), stateSnapshot.sessionId()));
         }
         if (!staleHandle && stateSnapshot.event().getState() == KeeperState.SyncConnected
                 && stateSnapshot.handleGeneration() != UNKNOWN_HANDLE_GENERATION) {
@@ -214,6 +255,7 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     }
 
     synchronized void setSessionInvalid() {
+        resetProbeTiming();
         currentStatus = SessionEvent.SessionLost;
     }
 
@@ -235,44 +277,96 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
         return new HandleIdentity(UNKNOWN_HANDLE_GENERATION, zk.getSessionId());
     }
 
-    // Capture and compare the handle identity atomically with handle publication. The operation can be retried on a
-    // replacement handle by PulsarZooKeeperClient, but its result is safe to use only while the captured identity is
-    // still current. Keep this check and the state transition in the same synchronized section so a stale probe cannot
-    // overwrite a newly established session.
-    private synchronized void checkStateIfSameSession(HandleIdentity checkedHandleIdentity,
-                                                       StateSnapshot stateSnapshot) {
+    private synchronized Probe beginProbe() {
+        HandleIdentity identity = getCurrentHandleIdentity();
+        return runIfCurrentHandle(identity, () -> trackProbeHandle(identity))
+                ? new Probe(identity, probeGeneration) : null;
+    }
+
+    private void trackProbeHandle(HandleIdentity identity) {
+        if (!identity.equals(probeHandleIdentity)) {
+            resetProbeTiming();
+            probeHandleIdentity = identity;
+        }
+    }
+
+    private void resetProbeTiming() {
+        firstUnansweredProbeAt = 0;
+        disconnectedAt = 0;
+        probeGeneration++;
+    }
+
+    private synchronized void clearTimedOutProbe(Probe probe) {
+        runIfCurrentHandle(probe.handleIdentity(), () -> {
+            ZooKeeper.States state = zk.getState();
+            if (probe.generation() == probeGeneration
+                    && (replacedSessionId == 0 || replacedSessionId != probe.handleIdentity().sessionId())
+                    && (state == ZooKeeper.States.CONNECTED || state == ZooKeeper.States.CONNECTEDREADONLY)) {
+                resetProbeTiming();
+            }
+        });
+    }
+
+    // Called under the watcher monitor. Hold the client's handle-publication lock only for state bookkeeping;
+    // listeners must run after that lock is released.
+    private boolean runIfCurrentHandle(HandleIdentity checkedHandleIdentity, Runnable stateUpdate) {
+        if (closed) {
+            return false;
+        }
         if (zk instanceof PulsarZooKeeperClient) {
             PulsarZooKeeperClient.CurrentHandleIdentity expectedIdentity =
                     new PulsarZooKeeperClient.CurrentHandleIdentity(checkedHandleIdentity.handleGeneration(),
                             checkedHandleIdentity.sessionId());
-            List<SessionEvent> notifications = new ArrayList<>(2);
-            boolean processed = ((PulsarZooKeeperClient) zk).runStateUpdateIfCurrentHandle(expectedIdentity,
-                    () -> processCurrentProbeState(checkedHandleIdentity, stateSnapshot, notifications::add));
-            if (!processed) {
-                logStaleProbe(checkedHandleIdentity, getCurrentHandleIdentity(), stateSnapshot);
-                return;
-            }
-            notifySessionListener(notifications);
-            return;
+            return ((PulsarZooKeeperClient) zk).runStateUpdateIfCurrentHandle(expectedIdentity, stateUpdate);
         }
-
-        HandleIdentity currentHandleIdentity = getCurrentHandleIdentity();
-        if (checkedHandleIdentity.sessionId() != currentHandleIdentity.sessionId()) {
-            logStaleProbe(checkedHandleIdentity, currentHandleIdentity, stateSnapshot);
-            return;
+        if (!checkedHandleIdentity.equals(getCurrentHandleIdentity())) {
+            return false;
         }
-        processCurrentProbeState(checkedHandleIdentity, stateSnapshot, sessionListener);
+        stateUpdate.run();
+        return true;
     }
 
-    private void processCurrentProbeState(HandleIdentity checkedHandleIdentity, StateSnapshot stateSnapshot,
-                                          Consumer<SessionEvent> notificationSink) {
-        if (stateSnapshot.keeperState() == KeeperState.SyncConnected
-                && checkedHandleIdentity.handleGeneration() != UNKNOWN_HANDLE_GENERATION) {
-            lastConnectedHandleGeneration = Math.max(lastConnectedHandleGeneration,
-                    checkedHandleIdentity.handleGeneration());
+    // Capture and compare the handle identity atomically with handle publication. The operation can be retried on a
+    // replacement handle by PulsarZooKeeperClient, but its result is safe to use only while the captured identity is
+    // still current. Keep this check and the state transition in the same synchronized section so a stale probe cannot
+    // overwrite a newly established session.
+    private synchronized void checkStateIfSameSession(Probe probe, StateSnapshot stateSnapshot, boolean timedOut) {
+        if (closed) {
+            return;
         }
-        checkState(stateSnapshot.keeperState(), stateSnapshot.clientState(), checkedHandleIdentity.sessionId(),
-                notificationSink);
+        List<SessionEvent> notifications = new ArrayList<>(2);
+        boolean processed = runIfCurrentHandle(probe.handleIdentity(), () -> {
+            if (probe.generation() != probeGeneration) {
+                return;
+            }
+            if (timedOut && stateSnapshot.clientState() == ZooKeeper.States.CONNECTED) {
+                // The client is connected: an unanswered probe is slow, not a disconnection. Remember when it was
+                // first seen unanswered so the time still counts if a disconnection is confirmed later.
+                if (disconnectedAt != 0) {
+                    handleDisconnected(notifications::add);
+                } else if (firstUnansweredProbeAt == 0) {
+                    firstUnansweredProbeAt = nanoTime.getAsLong();
+                }
+                return;
+            }
+            if (timedOut && stateSnapshot.clientState() == ZooKeeper.States.CLOSED && disconnectedAt != 0) {
+                // Keep an already-confirmed deadline running while the client is closed.
+                handleDisconnected(notifications::add);
+                return;
+            }
+            if (stateSnapshot.keeperState() == KeeperState.SyncConnected
+                    && probe.handleIdentity().handleGeneration() != UNKNOWN_HANDLE_GENERATION) {
+                lastConnectedHandleGeneration = Math.max(lastConnectedHandleGeneration,
+                        probe.handleIdentity().handleGeneration());
+            }
+            checkState(stateSnapshot.keeperState(), stateSnapshot.clientState(), probe.handleIdentity().sessionId(),
+                    notifications::add);
+        });
+        if (!processed) {
+            logStaleProbe(probe.handleIdentity(), getCurrentHandleIdentity(), stateSnapshot);
+            return;
+        }
+        notifySessionListener(notifications);
     }
 
     private void logStaleProbe(HandleIdentity checkedHandleIdentity, HandleIdentity currentHandleIdentity,
@@ -343,12 +437,15 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     private void handleDisconnected(Consumer<SessionEvent> notificationSink) {
         if (disconnectedAt == 0) {
             // this is the first disconnect event, we should monitor the time out from now, so we record the
-            // time of disconnect
-            disconnectedAt = System.nanoTime();
+            // time of disconnect. A probe that was already unanswered when the disconnection was confirmed
+            // started the outage earlier, so its time counts too.
+            disconnectedAt = firstUnansweredProbeAt != 0 ? firstUnansweredProbeAt : nanoTime.getAsLong();
+            firstUnansweredProbeAt = 0;
+            probeGeneration++;
         }
 
         long timeRemainingMillis = monitorTimeoutMillis
-                - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - disconnectedAt);
+                - TimeUnit.NANOSECONDS.toMillis(nanoTime.getAsLong() - disconnectedAt);
         if (timeRemainingMillis <= 0 && currentStatus != SessionEvent.SessionLost) {
             log.error("ZooKeeper session reconnection timeout. Notifying session is lost.");
             currentStatus = SessionEvent.SessionLost;
@@ -366,7 +463,7 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     }
 
     private void handleConnectedReadOnly(Consumer<SessionEvent> notificationSink) {
-        disconnectedAt = 0;
+        resetProbeTiming();
         if (currentStatus == SessionEvent.SessionReestablished) {
             log.warn()
                     .attr("sessionId", zk.getSessionId())
@@ -380,17 +477,18 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     }
 
     private void handleSyncConnected(long sessionId, Consumer<SessionEvent> notificationSink) {
+        if (replacedSessionId != 0 && sessionId == replacedSessionId) {
+            log.info().attr("sessionId", replacedSessionId)
+                    .log("Ignoring the connection of a ZooKeeper session that is being replaced");
+            return;
+        }
+        // Even an already-established session can have unanswered probes whose timing must be discarded on recovery.
+        resetProbeTiming();
         if (currentStatus != SessionEvent.SessionReestablished) {
-            if (replacedSessionId != 0 && sessionId == replacedSessionId) {
-                log.info().attr("sessionId", replacedSessionId)
-                        .log("Ignoring the connection of a ZooKeeper session that is being replaced");
-                return;
-            }
             replacedSessionId = 0;
 
             // since it reconnected to zoo keeper, we reset the disconnected time
             log.info().attr("currentStatus", currentStatus).log("ZooKeeper client reconnection with server quorum");
-            disconnectedAt = 0;
 
             SessionEvent previousStatus = currentStatus;
             // Update the status before notifying the listener: a listener that can't use the new session, such
@@ -421,6 +519,9 @@ public class ZKSessionWatcher implements AutoCloseable, Watcher {
     }
 
     private record StateSnapshot(KeeperState keeperState, ZooKeeper.States clientState) {
+    }
+
+    private record Probe(HandleIdentity handleIdentity, long generation) {
     }
 
     private record HandleIdentity(long handleGeneration, long sessionId) {
