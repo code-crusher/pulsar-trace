@@ -17,11 +17,6 @@
  * under the License.
  */
 
-import java.net.InetAddress
-import java.time.ZoneOffset
-import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
-
 plugins {
     id("pulsar.public-java-library-conventions")
     id("pulsar.test-certs-conventions")
@@ -33,9 +28,18 @@ plugins {
 // a recompile of pulsar-common or any downstream module's compileJava.
 //
 // `pulsarIncludeBuildInfo` (default `false` in the root gradle.properties) controls whether the
-// git/build metadata is captured at all. Release builds enable it with
+// git metadata is captured at all. Release builds enable it with
 // `-PpulsarIncludeBuildInfo=true` or the `ORG_GRADLE_PROJECT_pulsarIncludeBuildInfo=true`
 // environment variable. When disabled, PulsarVersion returns placeholder values at runtime.
+//
+// Reproducible builds (#24718): only metadata that can be derived from the sources is captured
+// (git.commit.id and git.dirty). The builder-identifying values that older releases embedded
+// (git.branch, git.build.user.*, git.build.host, git.build.time) are deliberately NOT captured:
+// they depend on who builds and when, so no independent rebuild could ever match them, and
+// PulsarVersion reports "unknown" for them instead. The key set also filters what a reused
+// snapshot file may contribute, so a snapshot written by an older release process cannot
+// reintroduce the removed values.
+val reproducibleBuildInfoKeys = setOf("git.commit.id", "git.dirty")
 val includeBuildInfo = providers.gradleProperty("pulsarIncludeBuildInfo")
     .map { it.toBoolean() }
     .orElse(true)
@@ -43,18 +47,20 @@ val includeBuildInfo = providers.gradleProperty("pulsarIncludeBuildInfo")
 // `pulsarBuildInfoFile` (optional) points to a snapshot file that keeps the captured build
 // metadata identical across separate Gradle invocations (the release process runs several).
 // If the file exists, its entries are used as-is; otherwise the metadata is captured and
-// written to the file so that subsequent invocations reuse it. Without the snapshot, values
-// such as `git.build.time` change on every capture and invalidate the build outputs.
-// A relative path is resolved against the root project directory.
+// written to the file so that subsequent invocations reuse it. A relative path is resolved
+// against the root project directory.
 val buildInfoFile = providers.gradleProperty("pulsarBuildInfoFile")
     .map { rootDir.resolve(it) }
 
 val generatePulsarBuildInfo = tasks.register("generatePulsarBuildInfo") {
-    description = "Generates pulsar-version.properties with version and (optionally) git/build metadata."
+    description = "Generates pulsar-version.properties with version and (optionally) git metadata."
     val outputFile = layout.buildDirectory.file("generated-resources/buildinfo/org/apache/pulsar/pulsar-version.properties")
     val projectVersion = project.version.toString()
     val includeBuildInfoValue = includeBuildInfo
     val buildInfoFileValue = buildInfoFile.orNull
+    // Captured as a task-local so the doLast below doesn't capture the script object
+    // (configuration cache).
+    val reproducibleKeys = reproducibleBuildInfoKeys.toSet()
 
     // Lazy providers — evaluated at execution time only (no impact on configuration cache).
     val gitCommitId = providers.exec {
@@ -65,18 +71,6 @@ val generatePulsarBuildInfo = tasks.register("generatePulsarBuildInfo") {
         commandLine("git", "status", "--porcelain")
         isIgnoreExitValue = true
     }.standardOutput.asText.map { it.isNotBlank().toString() }
-    val gitBranch = providers.exec {
-        commandLine("git", "rev-parse", "--abbrev-ref", "HEAD")
-        isIgnoreExitValue = true
-    }.standardOutput.asText.map { it.trim() }
-    val gitUserEmail = providers.exec {
-        commandLine("git", "config", "user.email")
-        isIgnoreExitValue = true
-    }.standardOutput.asText.map { it.trim() }
-    val gitUserName = providers.exec {
-        commandLine("git", "config", "user.name")
-        isIgnoreExitValue = true
-    }.standardOutput.asText.map { it.trim() }
 
     inputs.property("version", projectVersion)
     inputs.property("includeBuildInfo", includeBuildInfoValue)
@@ -87,8 +81,8 @@ val generatePulsarBuildInfo = tasks.register("generatePulsarBuildInfo") {
 
     doLast {
         // Hand-rolled .properties writer so we don't get the non-deterministic timestamp comment
-        // that java.util.Properties.store always emits. Values from git/InetAddress are ASCII
-        // identifiers, so backslash escaping is sufficient.
+        // that java.util.Properties.store always emits. Values from git are ASCII identifiers,
+        // so backslash escaping is sufficient.
         fun formatProperties(entries: Map<String, String>) = buildString {
             append("# Pulsar build info\n")
             entries.forEach { (key, value) ->
@@ -110,7 +104,7 @@ val generatePulsarBuildInfo = tasks.register("generatePulsarBuildInfo") {
                         if (separator > 0) {
                             val key = line.substring(0, separator)
                             // the version always comes from the project, never from the snapshot
-                            if (key != "version") {
+                            if (key != "version" && key in reproducibleKeys) {
                                 buildInfoEntries[key] = line.substring(separator + 1).replace("\\\\", "\\")
                             }
                         }
@@ -118,12 +112,6 @@ val generatePulsarBuildInfo = tasks.register("generatePulsarBuildInfo") {
             } else {
                 buildInfoEntries["git.commit.id"] = gitCommitId.getOrElse("")
                 buildInfoEntries["git.dirty"] = gitDirty.getOrElse("true")
-                buildInfoEntries["git.branch"] = gitBranch.getOrElse("")
-                buildInfoEntries["git.build.user.email"] = gitUserEmail.getOrElse("")
-                buildInfoEntries["git.build.user.name"] = gitUserName.getOrElse("")
-                buildInfoEntries["git.build.host"] = InetAddress.getLocalHost().hostName
-                buildInfoEntries["git.build.time"] =
-                    ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"))
                 if (buildInfoFileValue != null) {
                     buildInfoFileValue.parentFile?.mkdirs()
                     buildInfoFileValue.writeText(formatProperties(buildInfoEntries))

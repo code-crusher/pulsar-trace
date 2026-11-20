@@ -92,6 +92,16 @@ nar {
     narId.set(defaultArchivesName())
 }
 
+// Reproducible builds (#24718): the NAR plugin stamps `Build-Timestamp` (wall clock) and
+// `Build-Tag` (git describe) into the manifest from a `doFirst` action at execution time.
+// Neither is derivable from the sources, and nothing in Pulsar reads them (the NarClassLoader
+// only looks at Nar-Id), so keep them out of the rendered manifest. The plugin's action runs
+// after any action registered here, so the attributes cannot be removed eagerly — they are
+// filtered at render time instead, see ReproducibleManifest.
+tasks.named("nar", Jar::class.java) {
+    setManifest(ReproducibleManifest(manifest, setOf("Build-Timestamp", "Build-Tag")))
+}
+
 // --- NAR publishing: publish only the .nar artifact ---
 // A NAR bundles every dependency, so the publication has no software component: its POM lists no
 // dependencies, and it has no Gradle Module Metadata, which would reference the bundled projects,
