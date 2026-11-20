@@ -2352,12 +2352,23 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
         log.debug().attr("name", name).log("Checking replication status");
         List<String> configuredClusters = topicPolicies.getReplicationClusters().get();
+        final String localCluster = brokerService.pulsar().getConfiguration().getClusterName();
         if (CollectionUtils.isEmpty(configuredClusters)) {
             log.warn().attr("name", name).log("No replication clusters configured");
-            return CompletableFuture.completedFuture(null);
+            if (replicators.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            // Replication has been disabled at the namespace level (an empty replication-cluster list): stop the
+            // running replicators. Unlike removing a single cluster from the replication list, disabling the
+            // replication does not delete the topic on any cluster, so it keeps being served locally.
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            replicators.forEach((cluster, replicator) -> {
+                if (!cluster.equals(localCluster)) {
+                    futures.add(removeReplicator(cluster));
+                }
+            });
+            return FutureUtil.waitForAll(futures);
         }
-
-        final String localCluster = brokerService.pulsar().getConfiguration().getClusterName();
 
         return removeTopicIfLocalClusterNotAllowed().thenCompose(topicRemoved -> {
             if (topicRemoved) {

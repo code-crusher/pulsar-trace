@@ -36,6 +36,7 @@ import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.impl.ConsumerImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.Policies;
 import org.awaitility.Awaitility;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -123,6 +124,86 @@ public class ReplicatorGlobalNSTest extends ReplicatorTestBase {
             Assert.assertFalse(consumer1.isConnected());
             Assert.assertTrue(consumer2.isConnected());
         });
+    }
+
+    /**
+     * Clearing the replication clusters of a namespace disables the replication: the topics are not deleted on any
+     * cluster and keep being served locally, but the data is not replicated between the clusters anymore.
+     * See issue #24640.
+     */
+    @SuppressWarnings("deprecation")
+    @Test
+    public void testDisableNamespaceReplicationWithEmptyClusters() throws Exception {
+        final String namespace = BrokerTestUtil.newUniqueName("pulsar/disable-repl");
+        admin1.namespaces().createNamespace(namespace, Sets.newHashSet("r1", "r2", "r3"));
+
+        final String topicName = "persistent://" + namespace + "/topic";
+        final TopicName topic = TopicName.get(topicName);
+
+        @Cleanup
+        PulsarClient client1 = PulsarClient.builder().serviceUrl(url1.toString()).statsInterval(0, TimeUnit.SECONDS)
+                .build();
+        @Cleanup
+        PulsarClient client2 = PulsarClient.builder().serviceUrl(url2.toString()).statsInterval(0, TimeUnit.SECONDS)
+                .build();
+
+        ProducerImpl<byte[]> producer1 = (ProducerImpl<byte[]>) client1.newProducer().topic(topicName)
+                .enableBatching(false).messageRoutingMode(MessageRoutingMode.SinglePartition).create();
+        ConsumerImpl<byte[]> consumer1 = (ConsumerImpl<byte[]>) client1.newConsumer().topic(topicName)
+                .subscriptionName("sub1").subscribe();
+        ConsumerImpl<byte[]> consumer2 = (ConsumerImpl<byte[]>) client2.newConsumer().topic(topicName)
+                .subscriptionName("sub1").subscribe();
+
+        producer1.send("message-1".getBytes());
+
+        // The message is replicated to cluster r2.
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            Topic replTopic1 = pulsar1.getBrokerService().getTopicReference(topic.toString()).orElseThrow();
+            Topic replTopic2 = pulsar2.getBrokerService().getTopicReference(topic.toString()).orElseThrow();
+            Assert.assertEquals(replTopic1.getReplicators().size(), 2);
+            Assert.assertEquals(replTopic2.getReplicators().size(), 2);
+        });
+
+        // Disable the namespace-level replication with an empty cluster list.
+        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet(), false);
+
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() ->
+                Assert.assertEquals(admin1.namespaces().getPolicies(namespace).replication_clusters.size(), 0));
+        Policies policies = admin1.namespaces().getPolicies(namespace);
+        Assert.assertTrue(policies.replication_clusters.isEmpty());
+        // The clusters that served the namespace keep access to it.
+        Assert.assertEquals(policies.allowed_clusters, Sets.newHashSet("r1", "r2", "r3"));
+
+        // The replicators are stopped, so no more data is replicated between the clusters.
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            Topic replTopic1 = pulsar1.getBrokerService().getTopicReference(topic.toString()).orElseThrow();
+            Topic replTopic2 = pulsar2.getBrokerService().getTopicReference(topic.toString()).orElseThrow();
+            Assert.assertTrue(replTopic1.getReplicators().isEmpty());
+            Assert.assertTrue(replTopic2.getReplicators().isEmpty());
+        });
+
+        // Unlike removing a single cluster from the replication list, disabling the replication does not delete the
+        // topics: the local topics keep being served on every cluster.
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            Assert.assertTrue(producer1.isConnected());
+            Assert.assertTrue(consumer1.isConnected());
+            Assert.assertTrue(consumer2.isConnected());
+        });
+        producer1.send("message-2".getBytes());
+        Assert.assertTrue(pulsar2.getBrokerService().getTopics().containsKey(topicName));
+
+        // Re-enabling the replication restores the replicators.
+        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("r1", "r2", "r3"), false);
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            Topic replTopic1 = pulsar1.getBrokerService().getTopicReference(topic.toString()).orElseThrow();
+            Assert.assertEquals(replTopic1.getReplicators().size(), 2);
+        });
+
+        producer1.close();
+        consumer1.close();
+        consumer2.close();
+        client1.close();
+        client2.close();
     }
 
     /**

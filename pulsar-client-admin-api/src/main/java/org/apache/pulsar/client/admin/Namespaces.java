@@ -836,6 +836,9 @@ public interface Namespaces {
      *     removed cluster, but existing data on the removed cluster is preserved.</li>
      * </ul>
      * <p/>
+     * Passing an empty cluster list disables the namespace-level replication: the clusters that were serving
+     * the namespace keep serving their local topics, but no data is replicated between the clusters anymore.
+     * <p/>
      * Request example:
      *
      * <pre>
@@ -872,6 +875,9 @@ public interface Namespaces {
      *     operating cluster's behavior. Geo-replication stops from the operating cluster to the
      *     removed cluster, but existing data on the removed cluster is preserved.</li>
      * </ul>
+     * <p/>
+     * Passing an empty cluster list disables the namespace-level replication: the clusters that were serving
+     * the namespace keep serving their local topics, but no data is replicated between the clusters anymore.
      * <p/>
      * Request example:
      *

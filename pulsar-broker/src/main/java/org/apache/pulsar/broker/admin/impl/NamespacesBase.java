@@ -888,9 +888,9 @@ public abstract class NamespacesBase extends AdminResource {
         return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.REPLICATION, PolicyOperation.WRITE)
                 .thenCompose(__ -> validatePoliciesReadOnlyAccessAsync())
                 .thenApply(__ -> {
-                    if (CollectionUtils.isEmpty(clusterIds)) {
-                        throw new RestException(Status.PRECONDITION_FAILED, "ClusterIds should not be null or empty");
-                    }
+                    checkNotNull(clusterIds, "ClusterIds should not be null");
+                    // An empty cluster list disables the namespace-level replication: the topics under the namespace
+                    // are no longer replicated to other clusters, while they remain served by the allowed clusters.
                     return Sets.newHashSet(clusterIds);
                 }).thenCompose(replicationClusterSet -> clustersAsync()
                         .thenCompose(clusters -> {
@@ -927,6 +927,13 @@ public abstract class NamespacesBase extends AdminResource {
                             policies.replication_clusters))
                         .thenApply(__ -> replicationClusterSet);
                 }).thenCompose(replicationClusterSet -> updatePoliciesAsync(namespaceName, policies -> {
+                    // Clearing the replication clusters disables namespace-level replication. The clusters that were
+                    // serving the namespace keep access to it: allowed_clusters takes over the access-control role
+                    // (see PIP-321) once the replication clusters are empty, so the local topics are not deleted by
+                    // the "cluster removed from the replication list" handling and remain served by each cluster.
+                    if (replicationClusterSet.isEmpty() && !policies.replication_clusters.isEmpty()) {
+                        policies.allowed_clusters.addAll(policies.replication_clusters);
+                    }
                     policies.replication_clusters = replicationClusterSet;
                     return policies;
                 }));

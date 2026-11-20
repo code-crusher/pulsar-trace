@@ -31,7 +31,6 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 import com.google.common.collect.Sets;
@@ -1368,8 +1367,12 @@ public class NamespacesTest extends MockedPulsarServiceBaseTest {
     public void testSetNamespaceReplicationCluters() throws Exception {
         String namespace = BrokerTestUtil.newUniqueName(this.testTenant + "/namespace");
         admin.namespaces().createNamespace(namespace, 100);
-        assertThrows(PulsarAdminException.PreconditionFailedException.class,
-                () -> admin.namespaces().setNamespaceReplicationClusters(namespace, Set.of(), false));
+        // Setting an empty cluster list disables the namespace-level replication.
+        admin.namespaces().setNamespaceReplicationClusters(namespace, Set.of(), false);
+        Policies policies = admin.namespaces().getPolicies(namespace);
+        assertTrue(policies.replication_clusters.isEmpty());
+        // The local cluster keeps access to the namespace through the allowed clusters.
+        assertTrue(policies.allowed_clusters.contains(this.testLocalCluster));
     }
 
     @Test

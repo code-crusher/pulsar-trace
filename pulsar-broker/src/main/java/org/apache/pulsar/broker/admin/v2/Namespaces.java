@@ -534,7 +534,9 @@ public class Namespaces extends NamespacesBase {
     @Operation(summary = "Set the replication clusters for a namespace. "
             + "When removing a cluster: "
             + "with shared configuration store, data will be deleted from the removed cluster; "
-            + "with separate configuration store, only replication stops but data is preserved.")
+            + "with separate configuration store, only replication stops but data is preserved. "
+            + "An empty list disables the namespace-level replication: the topics of the namespace keep being "
+            + "served by their clusters, but no data is replicated anymore.")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "Operation successful"),
             @ApiResponse(responseCode = "403", description = "Don't have admin permission"),
