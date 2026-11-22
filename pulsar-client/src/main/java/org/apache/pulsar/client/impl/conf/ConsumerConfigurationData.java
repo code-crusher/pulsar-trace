@@ -340,9 +340,13 @@ public class ConsumerConfigurationData<T> implements Serializable, Cloneable {
                     + "\n"
                     + "* **PersistentOnly**: only subscribe to persistent topics.\n"
                     + "* **NonPersistentOnly**: only subscribe to non-persistent topics.\n"
-                    + "* **AllTopics**: subscribe to both persistent and non-persistent topics."
+                    + "* **AllTopics**: subscribe to both persistent and non-persistent topics.\n"
+                    + "\n"
+                    + "When unset, the type is derived from the topic domain of the pattern: a `persistent://` or "
+                    + "`non-persistent://` pattern selects that domain, and a pattern without a domain selects "
+                    + "persistent topics."
     )
-    private RegexSubscriptionMode regexSubscriptionMode = RegexSubscriptionMode.PersistentOnly;
+    private RegexSubscriptionMode regexSubscriptionMode;
 
     @Schema(
             name = "deadLetterPolicy",

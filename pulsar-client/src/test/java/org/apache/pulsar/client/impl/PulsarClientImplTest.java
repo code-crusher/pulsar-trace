@@ -76,6 +76,7 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientSharedResources;
+import org.apache.pulsar.client.api.RegexSubscriptionMode;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.ServiceUrlProvider;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
@@ -462,6 +463,33 @@ public class PulsarClientImplTest {
         } finally {
             client.close();
         }
+    }
+
+    @Test
+    public void testConvertRegexSubscriptionMode() {
+        // An explicit mode wins, whatever the pattern's topic domain
+        for (String pattern : new String[]{"persistent://public/default/topic.*",
+                "non-persistent://public/default/topic.*", "public/default/topic.*"}) {
+            TopicName topicName = TopicName.get(pattern);
+            assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(RegexSubscriptionMode.PersistentOnly,
+                    topicName), CommandGetTopicsOfNamespace.Mode.PERSISTENT);
+            assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(RegexSubscriptionMode.NonPersistentOnly,
+                    topicName), CommandGetTopicsOfNamespace.Mode.NON_PERSISTENT);
+            assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(RegexSubscriptionMode.AllTopics,
+                    topicName), CommandGetTopicsOfNamespace.Mode.ALL);
+        }
+
+        // Without an explicit mode, the pattern's topic domain selects it, and a pattern without a domain keeps
+        // the default of persistent topics
+        assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(null,
+                        TopicName.get("persistent://public/default/topic.*")),
+                CommandGetTopicsOfNamespace.Mode.PERSISTENT);
+        assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(null,
+                        TopicName.get("non-persistent://public/default/topic.*")),
+                CommandGetTopicsOfNamespace.Mode.NON_PERSISTENT);
+        assertEquals(PulsarClientImpl.convertRegexSubscriptionMode(null,
+                        TopicName.get("public/default/topic.*")),
+                CommandGetTopicsOfNamespace.Mode.PERSISTENT);
     }
 
     @Test

@@ -457,6 +457,59 @@ public class PatternTopicsConsumerImplTest extends SharedPulsarBaseTest {
         producer4.close();
     }
 
+    /**
+     * A {@code non-persistent://} pattern subscribes to the non-persistent topics that match it, even though the
+     * consumer does not set {@code subscriptionTopicsMode}, and the pattern's domain is ignored when matching topic
+     * names, so a persistent topic of the same name is not subscribed to.
+     *
+     * @see <a href="https://github.com/apache/pulsar/issues/24310">issue #24310</a>
+     */
+    @Test(timeOut = testTimeout)
+    public void testNonPersistentPatternWithoutSubscriptionTopicsMode() throws Exception {
+        String key = "NonPersistentPatternWithoutSubscriptionTopicsMode";
+        String subscriptionName = "my-ex-subscription-" + key;
+        String topicName = "same-name-topic-" + key;
+        String persistentTopic = "persistent://" + getNamespace() + "/" + topicName;
+        String nonPersistentTopic = "non-persistent://" + getNamespace() + "/" + topicName;
+        Pattern pattern = Pattern.compile("non-persistent://" + getNamespace() + "/same-name-topic-.*");
+
+        Producer<byte[]> persistentProducer = client.newProducer().topic(persistentTopic).create();
+        Producer<byte[]> nonPersistentProducer = client.newProducer().topic(nonPersistentTopic).create();
+
+        Consumer<byte[]> consumer = client.newConsumer()
+                .topicsPattern(pattern)
+                .patternAutoDiscoveryPeriod(1, TimeUnit.SECONDS)
+                .subscriptionName(subscriptionName)
+                .subscriptionType(SubscriptionType.Shared)
+                .subscribe();
+        try {
+            // The consumer subscribes to the non-persistent topic, and not to the persistent topic of the same
+            // name that the pattern also matches
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                List<String> partitions = ((PatternMultiTopicsConsumerImpl<?>) consumer).getPartitions();
+                assertEquals(partitions, Collections.singletonList(nonPersistentTopic));
+            });
+
+            // A topic created after the consumer is discovered by the periodic recheck
+            String lateNonPersistentTopic = "non-persistent://" + getNamespace() + "/same-name-topic-late-" + key;
+            Producer<byte[]> lateProducer = client.newProducer().topic(lateNonPersistentTopic).create();
+            try {
+                Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                    List<String> partitions = ((PatternMultiTopicsConsumerImpl<?>) consumer).getPartitions();
+                    assertEquals(partitions.size(), 2);
+                    assertTrue(partitions.contains(nonPersistentTopic));
+                    assertTrue(partitions.contains(lateNonPersistentTopic));
+                });
+            } finally {
+                lateProducer.close();
+            }
+        } finally {
+            consumer.close();
+            persistentProducer.close();
+            nonPersistentProducer.close();
+        }
+    }
+
     // verify consumer create success, and works well.
     @Test(timeOut = testTimeout)
     public void testBinaryProtoToGetTopicsOfNamespaceAll() throws Exception {

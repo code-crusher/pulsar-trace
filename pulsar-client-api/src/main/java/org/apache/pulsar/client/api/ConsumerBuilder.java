@@ -130,6 +130,9 @@ public interface ConsumerBuilder<T> extends Cloneable {
      *
      * <p>Will ignore the topic domain("persistent://" or "non-persistent://") when pattern matching.
      *
+     * <p>The topic domain, when present, still selects the type of topics that are matched, unless
+     * {@link #subscriptionTopicsMode(RegexSubscriptionMode)} is set. See that method for details.
+     *
      * <p>The pattern is applied to subscribe to all topics, within a single namespace, that match the
      * pattern.
      *
@@ -148,6 +151,9 @@ public interface ConsumerBuilder<T> extends Cloneable {
      * "persistent://public/default/pattern-topic-.*" or "public/default/pattern-topic-.*"
      *
      * <p>Will ignore the topic domain("persistent://" or "non-persistent://") when pattern matching.
+     *
+     * <p>The topic domain, when present, still selects the type of topics that are matched, unless
+     * {@link #subscriptionTopicsMode(RegexSubscriptionMode)} is set. See that method for details.
      *
      * <p>The pattern is applied to subscribe to all topics, within a single namespace, that match the
      * pattern.
@@ -626,6 +632,10 @@ public interface ConsumerBuilder<T> extends Cloneable {
     /**
      * Determines which topics this consumer should be subscribed to - Persistent, Non-Persistent, or both. Only used
      * with pattern subscriptions.
+     *
+     * <p>When this is not set, the topic domain named by the pattern selects the mode: a {@code persistent://} or
+     * {@code non-persistent://} pattern subscribes to that domain, and a pattern without a domain subscribes to
+     * persistent topics, which is also the mode of a consumer that is not a pattern consumer.
      *
      * @param regexSubscriptionMode
      *            Pattern subscription mode

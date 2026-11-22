@@ -1202,8 +1202,8 @@ public class PulsarClientImpl implements PulsarClient {
     private <T> CompletableFuture<Consumer<T>> patternTopicSubscribeAsync(ConsumerConfigurationData<T> conf,
             Schema<T> schema, ConsumerInterceptors<T> interceptors) {
         String regex = conf.getTopicsPattern().pattern();
-        Mode subscriptionMode = convertRegexSubscriptionMode(conf.getRegexSubscriptionMode());
         TopicName destination = TopicName.get(regex);
+        Mode subscriptionMode = convertRegexSubscriptionMode(conf.getRegexSubscriptionMode(), destination);
         NamespaceName namespaceName = destination.getNamespaceObject();
         TopicsPattern pattern = TopicsPatternFactory.create(conf.getTopicsPattern());
 
@@ -2039,7 +2039,17 @@ public class PulsarClientImpl implements PulsarClient {
         return consumers.size();
     }
 
-    private static Mode convertRegexSubscriptionMode(RegexSubscriptionMode regexSubscriptionMode) {
+    /**
+     * Resolves the type of topics a pattern subscribes to. An explicit {@link RegexSubscriptionMode} wins.
+     * Otherwise the topic domain named by the pattern selects it, so that a {@code non-persistent://} pattern
+     * subscribes to non-persistent topics even though the pattern's domain is ignored when matching topic names.
+     * A pattern without a domain keeps the default of persistent topics.
+     */
+    @VisibleForTesting
+    static Mode convertRegexSubscriptionMode(RegexSubscriptionMode regexSubscriptionMode, TopicName pattern) {
+        if (regexSubscriptionMode == null) {
+            return pattern.isPersistent() ? Mode.PERSISTENT : Mode.NON_PERSISTENT;
+        }
         switch (regexSubscriptionMode) {
         case PersistentOnly:
             return Mode.PERSISTENT;

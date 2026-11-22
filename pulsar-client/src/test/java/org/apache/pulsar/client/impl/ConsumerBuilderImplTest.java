@@ -633,7 +633,8 @@ public class ConsumerBuilderImplTest {
         assertFalse(configurationData.isReadCompacted());
         assertEquals(configurationData.getSubscriptionInitialPosition(), SubscriptionInitialPosition.Latest);
         assertEquals(configurationData.getPatternAutoDiscoveryPeriod(), 60);
-        assertEquals(configurationData.getRegexSubscriptionMode(), RegexSubscriptionMode.PersistentOnly);
+        // Unset, so that the topic domain of the pattern selects the mode
+        assertNull(configurationData.getRegexSubscriptionMode());
         assertEquals(configurationData.getDeadLetterPolicy().getDeadLetterTopic(), "dlq");
         assertEquals(configurationData.getDeadLetterPolicy().getRetryLetterTopic(), "retry");
         assertEquals(configurationData.getDeadLetterPolicy().getInitialSubscriptionName(), "dlq-sub");
