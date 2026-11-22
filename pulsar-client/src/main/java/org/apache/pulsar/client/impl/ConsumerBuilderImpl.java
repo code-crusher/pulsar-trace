@@ -110,7 +110,7 @@ public class ConsumerBuilderImpl<T> implements ConsumerBuilder<T> {
 
     private CompletableFuture<Boolean> checkDlqAlreadyExists(String topic) {
         CompletableFuture<Boolean> existsFuture = new CompletableFuture<>();
-        client.getPartitionedTopicMetadata(topic, false, true).thenAccept(metadata -> {
+        client.getPartitionedTopicMetadata(topic, false, false).thenAccept(metadata -> {
             TopicName topicName = TopicName.get(topic);
             if (topicName.isPersistent()) {
                 // Either partitioned or non-partitioned, it exists.
@@ -121,7 +121,19 @@ public class ConsumerBuilderImpl<T> implements ConsumerBuilder<T> {
             }
         }).exceptionally(ex -> {
             Throwable actEx = FutureUtil.unwrapCompletionException(ex);
-            if (actEx instanceof PulsarClientException.NotFoundException
+            if (actEx instanceof PulsarClientException.FeatureNotSupportedException featureEx
+                    && featureEx.getFailedFeatureCheck()
+                    == PulsarClientException.FailedFeatureCheck.SupportsGetPartitionedMetadataWithoutAutoCreation) {
+                // The broker predates PIP-344, so it cannot report a nonexistent topic: asked without auto-creation,
+                // it would create the topic and reply "{partitions: 0}". Fall back to the pre-PIP-344 client
+                // behavior, which considered only a partitioned topic as existing.
+                client.getPartitionedTopicMetadata(topic, true, false).thenAccept(metadata ->
+                        existsFuture.complete(metadata != null && metadata.partitions > 0))
+                        .exceptionally(ex2 -> {
+                            existsFuture.completeExceptionally(ex2);
+                            return null;
+                        });
+            } else if (actEx instanceof PulsarClientException.NotFoundException
                     || actEx instanceof PulsarClientException.TopicDoesNotExistException
                     || actEx instanceof PulsarAdminException.NotFoundException) {
                 existsFuture.complete(false);

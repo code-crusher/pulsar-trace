@@ -22,8 +22,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -72,6 +74,7 @@ import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
 import org.apache.pulsar.client.impl.conf.TopicConsumerConfigurationData;
 import org.apache.pulsar.client.impl.crypto.MessageCryptoBc;
+import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -583,6 +586,116 @@ public class ConsumerBuilderImplTest {
         assertEquals(subscribed.get(1).getDeadLetterPolicy().getRetryLetterTopic(),
                 "persistent://public/default/topic-b-sub-b-RETRY");
         assertNull(((ConsumerBuilderImpl<byte[]>) template).getConf().getDeadLetterPolicy().getDeadLetterTopic());
+    }
+
+    /**
+     * A pre-PIP-344 broker cannot report a nonexistent topic: asked without auto-creation it would create the
+     * topic and reply "{partitions: 0}". The client must fall back to the pre-PIP-344 behavior, which treats only
+     * a partitioned topic as existing, so the default naming "{topic}-{sub}-RETRY" is used for a topic that does
+     * not exist. See issue #24369.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPrePip344BrokerUsesNewRetryTopicNameWhenOldNameDoesNotExist() throws Exception {
+        PulsarClientImpl client = mock(PulsarClientImpl.class);
+        when(client.getCnxPool()).thenReturn(mock(ConnectionPool.class));
+        when(client.getConfiguration()).thenReturn(new ClientConfigurationData());
+        when(client.getPartitionedTopicMetadata(anyString(), eq(false), eq(false))).thenReturn(
+                CompletableFuture.failedFuture(new PulsarClientException.FeatureNotSupportedException(
+                        "not supported",
+                        PulsarClientException.FailedFeatureCheck
+                                .SupportsGetPartitionedMetadataWithoutAutoCreation)));
+        when(client.getPartitionedTopicMetadata(anyString(), eq(true), eq(false))).thenReturn(
+                CompletableFuture.completedFuture(new PartitionedTopicMetadata(0)));
+        List<ConsumerConfigurationData<byte[]>> subscribed = new ArrayList<>();
+        when(client.subscribeAsync(any(ConsumerConfigurationData.class), any(), any())).thenAnswer(invocation -> {
+            subscribed.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(mock(Consumer.class));
+        });
+
+        new ConsumerBuilderImpl<>(client, Schema.BYTES)
+                .topic("persistent://public/default/topic-a")
+                .subscriptionName("sub-a")
+                .enableRetry(true)
+                .subscribeAsync().get();
+
+        assertEquals(subscribed.size(), 1);
+        assertEquals(subscribed.get(0).getDeadLetterPolicy().getRetryLetterTopic(),
+                "persistent://public/default/topic-a-sub-a-RETRY");
+        assertEquals(subscribed.get(0).getDeadLetterPolicy().getDeadLetterTopic(),
+                "persistent://public/default/topic-a-sub-a-DLQ");
+    }
+
+    /**
+     * On a pre-PIP-344 broker, an old-naming retry topic that exists as a partitioned topic must keep being used,
+     * as clients before PIP-344 did.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPrePip344BrokerKeepsOldRetryTopicNameWhenPartitionedTopicExists() throws Exception {
+        PulsarClientImpl client = mock(PulsarClientImpl.class);
+        when(client.getCnxPool()).thenReturn(mock(ConnectionPool.class));
+        when(client.getConfiguration()).thenReturn(new ClientConfigurationData());
+        when(client.getPartitionedTopicMetadata(anyString(), eq(false), eq(false))).thenReturn(
+                CompletableFuture.failedFuture(new PulsarClientException.FeatureNotSupportedException(
+                        "not supported",
+                        PulsarClientException.FailedFeatureCheck
+                                .SupportsGetPartitionedMetadataWithoutAutoCreation)));
+        when(client.getPartitionedTopicMetadata(anyString(), eq(true), eq(false))).thenAnswer(invocation -> {
+            // The retry letter topic exists as a partitioned topic; the DLQ topic does not exist.
+            String topic = invocation.getArgument(0);
+            if (topic.endsWith("-RETRY")) {
+                return CompletableFuture.completedFuture(new PartitionedTopicMetadata(2));
+            }
+            return CompletableFuture.completedFuture(new PartitionedTopicMetadata(0));
+        });
+        List<ConsumerConfigurationData<byte[]>> subscribed = new ArrayList<>();
+        when(client.subscribeAsync(any(ConsumerConfigurationData.class), any(), any())).thenAnswer(invocation -> {
+            subscribed.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(mock(Consumer.class));
+        });
+
+        new ConsumerBuilderImpl<>(client, Schema.BYTES)
+                .topic("persistent://public/default/topic-a")
+                .subscriptionName("sub-a")
+                .enableRetry(true)
+                .subscribeAsync().get();
+
+        assertEquals(subscribed.size(), 1);
+        assertEquals(subscribed.get(0).getDeadLetterPolicy().getRetryLetterTopic(),
+                "persistent://public/default/sub-a-RETRY");
+        assertEquals(subscribed.get(0).getDeadLetterPolicy().getDeadLetterTopic(),
+                "persistent://public/default/topic-a-sub-a-DLQ");
+    }
+
+    /**
+     * A PIP-344 broker reports a nonexistent topic, so the new default naming is used without any fallback lookup.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPip344BrokerUsesNewRetryTopicNameWhenOldNameDoesNotExist() throws Exception {
+        PulsarClientImpl client = mock(PulsarClientImpl.class);
+        when(client.getCnxPool()).thenReturn(mock(ConnectionPool.class));
+        when(client.getConfiguration()).thenReturn(new ClientConfigurationData());
+        when(client.getPartitionedTopicMetadata(anyString(), eq(false), eq(false))).thenReturn(
+                CompletableFuture.failedFuture(new PulsarClientException.NotFoundException("not found")));
+        List<ConsumerConfigurationData<byte[]>> subscribed = new ArrayList<>();
+        when(client.subscribeAsync(any(ConsumerConfigurationData.class), any(), any())).thenAnswer(invocation -> {
+            subscribed.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(mock(Consumer.class));
+        });
+
+        new ConsumerBuilderImpl<>(client, Schema.BYTES)
+                .topic("persistent://public/default/topic-a")
+                .subscriptionName("sub-a")
+                .enableRetry(true)
+                .subscribeAsync().get();
+
+        assertEquals(subscribed.size(), 1);
+        assertEquals(subscribed.get(0).getDeadLetterPolicy().getRetryLetterTopic(),
+                "persistent://public/default/topic-a-sub-a-RETRY");
+        verify(client, never())
+                .getPartitionedTopicMetadata(anyString(), eq(true), anyBoolean());
     }
 
     @Test

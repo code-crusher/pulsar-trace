@@ -26,6 +26,8 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.Cleanup;
 import lombok.CustomLog;
@@ -41,8 +45,16 @@ import org.apache.avro.AvroRuntimeException;
 import org.apache.avro.reflect.Nullable;
 import org.apache.pulsar.broker.service.SharedPulsarBaseTest;
 import org.apache.pulsar.client.api.schema.GenericRecord;
+import org.apache.pulsar.client.impl.ClientCnx;
+import org.apache.pulsar.client.impl.ConnectionPool;
+import org.apache.pulsar.client.impl.PulsarClientImpl;
+import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
+import org.apache.pulsar.client.impl.metrics.InstrumentProvider;
 import org.apache.pulsar.client.util.RetryMessageUtil;
+import org.apache.pulsar.common.api.proto.CommandConnected;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.SchemaCompatibilityStrategy;
+import org.apache.pulsar.common.util.netty.EventLoopUtil;
 import org.testng.annotations.Test;
 import org.testng.collections.Lists;
 
@@ -665,6 +677,109 @@ public class RetryTopicTest extends SharedPulsarBaseTest {
 
         checkConsumer.close();
         newPulsarClient.close();
+    }
+
+    /**
+     * A client connected to a broker that does not support PIP-344 (broker &lt; 3.0.6, e.g. 2.11.0) must not
+     * mistake the "{partitions: 0}" answer that such a broker gives for a nonexistent topic for a topic that
+     * exists. Before the fix for issue #24369, the client picked the old "{subscription}-RETRY" naming for a topic
+     * that never existed, and subscribing then created that shared topic.
+     *
+     * <p>The connections of the client used here report an old broker's feature flag, without bypassing the real
+     * TCP handshake with the shared test broker.</p>
+     */
+    @Test(timeOut = 300_000)
+    public void testRetryTopicNameWithNonPIP344Broker() throws Exception {
+        final String topic = newTopicName();
+        final String subscription = "sub-" + System.nanoTime();
+        final String oldRetryTopic = "persistent://" + getNamespace() + "/" + subscription + "-RETRY";
+        final String newRetryTopic = topic + "-" + subscription + "-RETRY";
+
+        ClientConfigurationData clientConf = new ClientConfigurationData();
+        clientConf.setServiceUrl(getBrokerServiceUrl());
+        EventLoopGroup eventLoop = EventLoopUtil.newEventLoopGroup(1, false,
+                new DefaultThreadFactory("non-pip344-retry-test"));
+        try {
+            @Cleanup("shutdownNow")
+            ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+                    new DefaultThreadFactory("non-pip344-retry-test-scheduled"));
+            try (ConnectionPool pool = new ConnectionPool(InstrumentProvider.NOOP, clientConf, eventLoop, () -> {
+                ClientCnx cnx = new ClientCnx(InstrumentProvider.NOOP, clientConf, eventLoop) {
+                    @Override
+                    protected void handleConnected(CommandConnected connected) {
+                        // Simulate an old broker's feature flag without bypassing the TCP handshake.
+                        connected.getFeatureFlags().setSupportsGetPartitionedMetadataWithoutAutoCreation(false);
+                        super.handleConnected(connected);
+                    }
+                };
+                return cnx;
+            }, scheduler);
+                 PulsarClientImpl nonPip344Client = new PulsarClientImpl(clientConf, eventLoop, pool)) {
+                @Cleanup
+                Consumer<byte[]> consumer = nonPip344Client.newConsumer(Schema.BYTES)
+                        .topic(topic)
+                        .subscriptionName(subscription)
+                        .subscriptionType(SubscriptionType.Shared)
+                        .enableRetry(true)
+                        .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
+                        .subscribe();
+
+                List<String> namespaceTopics = admin.topics().getList(getNamespace());
+                assertTrue(namespaceTopics.contains(newRetryTopic),
+                        "The retry topic should use the default name that includes the topic name: " + newRetryTopic);
+                assertFalse(namespaceTopics.contains(oldRetryTopic),
+                        "The retry topic without the topic name must not be created: " + oldRetryTopic);
+            }
+        } finally {
+            eventLoop.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+        }
+
+        // Compatibility: an old-naming retry topic that exists as a partitioned topic keeps being used, exactly
+        // like clients before PIP-344 did.
+        final String subscription2 = "sub-" + System.nanoTime();
+        final String partitionedOldRetryTopic = "persistent://" + getNamespace() + "/" + subscription2 + "-RETRY";
+        final String newRetryTopic2 = topic + "-" + subscription2 + "-RETRY";
+        admin.topics().createPartitionedTopic(partitionedOldRetryTopic, 2);
+
+        EventLoopGroup eventLoop2 = EventLoopUtil.newEventLoopGroup(1, false,
+                new DefaultThreadFactory("non-pip344-retry-test-2"));
+        try {
+            @Cleanup("shutdownNow")
+            ScheduledExecutorService scheduler2 = Executors.newSingleThreadScheduledExecutor(
+                    new DefaultThreadFactory("non-pip344-retry-test-2-scheduled"));
+            try (ConnectionPool pool2 = new ConnectionPool(InstrumentProvider.NOOP, clientConf, eventLoop2, () -> {
+                ClientCnx cnx = new ClientCnx(InstrumentProvider.NOOP, clientConf, eventLoop2) {
+                    @Override
+                    protected void handleConnected(CommandConnected connected) {
+                        // Simulate an old broker's feature flag without bypassing the TCP handshake.
+                        connected.getFeatureFlags().setSupportsGetPartitionedMetadataWithoutAutoCreation(false);
+                        super.handleConnected(connected);
+                    }
+                };
+                return cnx;
+            }, scheduler2);
+                 PulsarClientImpl nonPip344Client2 = new PulsarClientImpl(clientConf, eventLoop2, pool2)) {
+                @Cleanup
+                Consumer<byte[]> consumer = nonPip344Client2.newConsumer(Schema.BYTES)
+                        .topic(topic)
+                        .subscriptionName(subscription2)
+                        .subscriptionType(SubscriptionType.Shared)
+                        .enableRetry(true)
+                        .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
+                        .subscribe();
+
+                List<String> namespaceTopics = admin.topics().getList(getNamespace());
+                // A partitioned topic appears in the topic list through its loaded partitions.
+                String partitionOfOldRetryTopic = TopicName.get(partitionedOldRetryTopic).getPartition(0).toString();
+                assertTrue(namespaceTopics.contains(partitionOfOldRetryTopic),
+                        "The existing partitioned retry topic without the topic name must keep being used");
+                assertFalse(namespaceTopics.contains(newRetryTopic2),
+                        "A retry topic that includes the topic name must not be created when the old-naming"
+                                + " partitioned topic exists");
+            }
+        } finally {
+            eventLoop2.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+        }
     }
 
     /**
