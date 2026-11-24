@@ -75,6 +75,7 @@ import org.apache.pulsar.functions.proto.Resources;
 import org.apache.pulsar.functions.proto.SourceSpec;
 import org.apache.pulsar.functions.proto.SubscriptionType;
 import org.apache.pulsar.functions.runtime.RuntimeCustomizer;
+import org.apache.pulsar.functions.runtime.RuntimeUtils;
 import org.apache.pulsar.functions.runtime.thread.ThreadRuntime;
 import org.apache.pulsar.functions.secretsprovider.ClearTextSecretsProvider;
 import org.apache.pulsar.functions.secretsproviderconfigurator.DefaultSecretsProviderConfigurator;
@@ -405,6 +406,36 @@ public class KubernetesRuntimeTest {
         factory = createKubernetesRuntimeFactory(null, 10, 1.0, 1.0);
 
         verifyJavaInstance(config, pulsarRootDir + "/instances/deps", true);
+    }
+
+    @Test
+    public void testMaskedExecutorCommandHidesSecrets() throws Exception {
+        // the authentication parameters and the secrets map, user config and sink configs are all part of
+        // the executor command of the function container; the logged command must mask them
+        AuthenticationConfig authConfig = AuthenticationConfig.builder()
+                .clientAuthenticationPlugin("org.apache.pulsar.client.impl.auth.AuthenticationToken")
+                .clientAuthenticationParameters("token:auth-secret")
+                .build();
+        factory = createKubernetesRuntimeFactory(null, 10, 1.0, 1.0, Optional.empty(), null, null, authConfig);
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, true);
+        config.getFunctionDetails().setUserConfig("{\"aws.secretKey\":\"SUPERSECRET\"}");
+        config.getFunctionDetails().setSink()
+                .setConfigs("{\"aws.accessKey\":\"AKIASECRET\",\"aws.secretKey\":\"SUPERSECRET\"}");
+
+        KubernetesRuntime container = factory.createContainer(config, userJarFile, userJarFile,
+                null, null, 30L);
+
+        String maskedCommand = container.getMaskedExecutorCommand();
+        assertTrue(maskedCommand.contains("--function_details " + RuntimeUtils.MASKED_VALUE));
+        assertTrue(maskedCommand.contains("--client_auth_params " + RuntimeUtils.MASKED_VALUE));
+        assertTrue(maskedCommand.contains("--secrets_provider_config " + RuntimeUtils.MASKED_VALUE));
+        assertFalse(maskedCommand.contains("SUPERSECRET"));
+        assertFalse(maskedCommand.contains("AKIASECRET"));
+        assertFalse(maskedCommand.contains("SomeMap"));
+        assertFalse(maskedCommand.contains("auth-secret"));
+        // non-sensitive arguments are preserved
+        assertTrue(maskedCommand.contains("--tenant " + TEST_TENANT));
+        assertTrue(maskedCommand.contains("--destination-file " + pulsarRootDir + "/" + userJarFile));
     }
 
     @Test

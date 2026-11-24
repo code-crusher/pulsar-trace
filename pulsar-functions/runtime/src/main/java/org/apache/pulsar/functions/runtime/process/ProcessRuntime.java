@@ -390,7 +390,7 @@ class ProcessRuntime implements Runtime {
             }
             secretsProviderConfigurator
                     .configureProcessRuntimeSecretsProvider(processBuilder, instanceConfig.getFunctionDetails());
-            log.info().attr("args", String.join(" ", processBuilder.command()))
+            log.info().attr("args", String.join(" ", RuntimeUtils.maskSensitiveArgs(processBuilder.command())))
                     .log("ProcessBuilder starting the process");
             process = processBuilder.start();
             log.info().attr("pid", process.pid()).log("Process started");

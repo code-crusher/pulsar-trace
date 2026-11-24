@@ -32,7 +32,6 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.kubernetes.client.custom.Quantity;
 import io.kubernetes.client.openapi.ApiException;
-import io.kubernetes.client.openapi.JSON;
 import io.kubernetes.client.openapi.apis.AppsV1Api;
 import io.kubernetes.client.openapi.apis.CoreV1Api;
 import io.kubernetes.client.openapi.models.V1Container;
@@ -462,7 +461,8 @@ public class KubernetesRuntime implements Runtime {
 
     private void submitService() throws Exception {
         final V1Service service = createService();
-        log.info().attr("service", JSON.serialize(service))
+        log.info().attr("service", service.getMetadata().getName())
+                .attr("namespace", jobNamespace)
                 .log("Submitting the following service to k8");
 
         String fqfn = FunctionCommon.getFullyQualifiedName(instanceConfig.getFunctionDetails());
@@ -552,7 +552,9 @@ public class KubernetesRuntime implements Runtime {
                                     Optional.ofNullable(instanceConfig.getFunctionAuthenticationSpec())))));
         }
 
-        log.info().attr("statefulSet", JSON.serialize(statefulSet))
+        log.info().attr("statefulSet", statefulSet.getMetadata().getName())
+                .attr("namespace", jobNamespace)
+                .attr("command", getMaskedExecutorCommand())
                 .log("Submitting the following spec to k8");
 
         String fqfn = FunctionCommon.getFullyQualifiedName(instanceConfig.getFunctionDetails());
@@ -808,6 +810,14 @@ public class KubernetesRuntime implements Runtime {
     }
 
     protected List<String> getExecutorCommand() {
+        return Arrays.asList("sh", "-c", String.join(" ", getExecutorCommandArgs()));
+    }
+
+    /**
+     * Returns the shell tokens of the container executor command: {@link #getExecutorCommand()} joins them into
+     * the single {@code sh -c} argument that runs in the function container.
+     */
+    protected List<String> getExecutorCommandArgs() {
         List<String> cmds =
                 new ArrayList<>(getDownloadCommand(instanceConfig.getFunctionDetails(), originalCodeFileName, false));
         if (isNotEmpty(originalTransformFunctionFileName)) {
@@ -819,7 +829,16 @@ public class KubernetesRuntime implements Runtime {
         cmds.add(setShardIdEnvironmentVariableCommand());
         cmds.add("&&");
         cmds.addAll(processArgs);
-        return Arrays.asList("sh", "-c", String.join(" ", cmds));
+        return cmds;
+    }
+
+    /**
+     * Returns the container executor command with the values of sensitive arguments replaced with
+     * {@link RuntimeUtils#MASKED_VALUE}, as it is logged by {@link #submitStatefulSet()}.
+     */
+    @VisibleForTesting
+    String getMaskedExecutorCommand() {
+        return String.join(" ", RuntimeUtils.maskSensitiveArgs(getExecutorCommandArgs()));
     }
 
     private List<String> getDownloadCommand(FunctionDetails functionDetails, String userCodeFilePath,

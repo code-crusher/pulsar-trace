@@ -19,6 +19,7 @@
 package org.apache.pulsar.functions.runtime;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -304,6 +305,62 @@ public class RuntimeUtilsTest {
         int indexShutdownHookOption = cmd.indexOf("-Dlog4j.shutdownHookEnabled=false");
         assertTrue(indexShutdownHookOption > 0);
         assertTrue(indexShutdownHookOption < indexJavaClass);
+    }
+
+    @Test
+    public void testMaskSensitiveArgs() throws Exception {
+        InstanceConfig instanceConfig = new InstanceConfig();
+        instanceConfig.setClusterName("kluster");
+        instanceConfig.setInstanceId(3000);
+        instanceConfig.setFunctionId("func-7734");
+        instanceConfig.setFunctionVersion("1.0.0");
+        instanceConfig.setMaxBufferedTuples(5);
+        instanceConfig.setPort(1337);
+        FunctionDetails functionDetails = new FunctionDetails();
+        functionDetails.setUserConfig("{\"aws.secretKey\":\"SUPERSECRET\"}");
+        functionDetails.setSecretsMap("{\"password\":\"SUPERSECRET\"}");
+        instanceConfig.setFunctionDetails(functionDetails);
+
+        AuthenticationConfig authConfig = AuthenticationConfig.builder()
+                .clientAuthenticationPlugin("org.apache.pulsar.client.impl.auth.AuthenticationToken")
+                .clientAuthenticationParameters("token:auth-secret")
+                .build();
+
+        List<String> cmd = RuntimeUtils.getCmd(instanceConfig, "instanceFile",
+                null, "logDirectory", "originalCodeFileName", null, "pulsarServiceUrl",
+                null, authConfig, "0", 23, 1234L, "logConfigFile",
+                "secretsProviderClassName", "{\"Config\":\"Value\"}", false, null, null,
+                "narExtractionDirectory", "functionInstanceClassPath", false, "");
+
+        // the secrets are part of the command that gets logged
+        assertTrue(String.join(" ", cmd).contains("SUPERSECRET"));
+        assertTrue(String.join(" ", cmd).contains("auth-secret"));
+
+        List<String> masked = RuntimeUtils.maskSensitiveArgs(cmd);
+        assertEquals(masked.size(), cmd.size());
+        assertEquals(masked.get(masked.indexOf("--function_details") + 1), RuntimeUtils.MASKED_VALUE);
+        assertEquals(masked.get(masked.indexOf("--client_auth_params") + 1), RuntimeUtils.MASKED_VALUE);
+        assertEquals(masked.get(masked.indexOf("--secrets_provider_config") + 1), RuntimeUtils.MASKED_VALUE);
+
+        String joined = String.join(" ", masked);
+        assertFalse(joined.contains("SUPERSECRET"));
+        assertFalse(joined.contains("auth-secret"));
+        assertFalse(joined.contains("token:"));
+        assertFalse(joined.contains("\"Config\":\"Value\""));
+        // non-sensitive arguments are preserved
+        assertTrue(joined.contains("--pulsar_serviceurl pulsarServiceUrl"));
+        assertTrue(joined.contains("--function_id func-7734"));
+        assertTrue(joined.contains("--client_auth_plugin org.apache.pulsar.client.impl.auth.AuthenticationToken"));
+        assertTrue(joined.contains("--secrets_provider secretsProviderClassName"));
+    }
+
+    @Test
+    public void testMaskSensitiveArgsOfGoInstanceCmd() {
+        // the Go instance config and a flag without value are not affected
+        List<String> masked = RuntimeUtils.maskSensitiveArgs(Arrays.asList(
+                "func", "-instance-conf", "'{\"secretsMap\":\"SUPERSECRET\"}'", "--function_details"));
+
+        assertEquals(masked, Arrays.asList("func", "-instance-conf", RuntimeUtils.MASKED_VALUE, "--function_details"));
     }
 
     @Test

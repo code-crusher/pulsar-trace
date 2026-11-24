@@ -42,6 +42,7 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.management.MalformedObjectNameException;
 import lombok.CustomLog;
 import org.apache.commons.lang3.JavaVersion;
@@ -65,6 +66,40 @@ public class RuntimeUtils {
 
     private static final String FUNCTIONS_EXTRA_DEPS_PROPERTY = "pulsar.functions.extra.dependencies.dir";
     public static final String FUNCTIONS_INSTANCE_CLASSPATH = "pulsar.functions.instance.classpath";
+
+    /**
+     * Value replacing the value of a sensitive instance command argument when the command is logged.
+     */
+    public static final String MASKED_VALUE = "******";
+
+    /**
+     * Instance command flags whose following value may hold secrets or user configuration: the serialized
+     * {@code --function_details} carry the secrets map and the user config (connector configs can embed
+     * credentials there), {@code --client_auth_params} and {@code --auth-params} hold the client
+     * authentication parameters, {@code --secrets_provider_config} holds the secrets provider configuration
+     * and {@code -instance-conf} is the Go instance's equivalent of {@code --function_details}.
+     */
+    private static final Set<String> SENSITIVE_ARG_FLAGS =
+            Set.of("--function_details", "--client_auth_params", "--auth-params", "--secrets_provider_config",
+                    "-instance-conf");
+
+    /**
+     * Returns a copy of the given command with the value that follows each sensitive flag (see
+     * {@link #SENSITIVE_ARG_FLAGS}) replaced with {@link #MASKED_VALUE}, so that the command can be logged
+     * without printing secrets or user configuration. The given command is not modified.
+     */
+    public static List<String> maskSensitiveArgs(List<String> args) {
+        List<String> masked = new LinkedList<>();
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            masked.add(arg);
+            if (SENSITIVE_ARG_FLAGS.contains(arg) && i + 1 < args.size()) {
+                masked.add(MASKED_VALUE);
+                i++;
+            }
+        }
+        return masked;
+    }
 
     public static List<String> composeCmd(InstanceConfig instanceConfig,
                                           String instanceFile,
